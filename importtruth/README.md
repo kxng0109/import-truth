@@ -65,5 +65,6 @@ On Windows use `mvnw.cmd` in place of `./mvnw`.
 
 ## Status
 
-M0 done: `ping` answers over stdio (unit plus end-to-end tests green, shaded
-JAR verified). Next is M1: resolve, index, lookup.
+M1 done: resolve, index, lookup, search (24 tests green on JDK 25 and 26,
+zero warnings; Jackson 3 found, Jackson 2 paths missing, deprecation
+correct). Next is M2: file check, hook plugin, policy engine.

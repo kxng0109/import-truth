@@ -10,9 +10,9 @@
     <version>0.1.0-SNAPSHOT</version>
   </parent>
 
-  <artifactId>importtruth-core</artifactId>
-  <name>importtruth-core</name>
-  <description>Resolve, index, lookup, check. Adapters via ServiceLoader.</description>
+  <artifactId>importtruth-adapter-java</artifactId>
+  <name>importtruth-adapter-java</name>
+  <description>ASM bytecode extractor. Reads shape only, never executes.</description>
 
   <dependencies>
     <dependency>
@@ -21,9 +21,9 @@
       <version>${project.version}</version>
     </dependency>
     <dependency>
-      <groupId>io.github.kxng0109</groupId>
-      <artifactId>importtruth-index</artifactId>
-      <version>${project.version}</version>
+      <groupId>org.ow2.asm</groupId>
+      <artifactId>asm</artifactId>
+      <version>${asm.version}</version>
     </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>

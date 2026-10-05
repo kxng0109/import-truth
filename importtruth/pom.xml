@@ -13,6 +13,8 @@
 
   <modules>
     <module>importtruth-model</module>
+    <module>importtruth-index</module>
+    <module>importtruth-adapter-java</module>
     <module>importtruth-core</module>
     <module>importtruth-mcp</module>
     <module>importtruth-cli</module>
@@ -25,6 +27,9 @@
     <junit.version>5.13.4</junit.version>
     <assertj.version>3.27.7</assertj.version>
     <slf4j.version>2.0.16</slf4j.version>
+    <asm.version>9.10.1</asm.version>
+    <sqlite.version>3.53.4.0</sqlite.version>
+    <h2.version>2.5.252</h2.version>
     <surefire.version>3.6.0</surefire.version>
     <shade.version>3.6.2</shade.version>
   </properties>

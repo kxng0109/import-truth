@@ -1,10 +1,19 @@
 package io.github.kxng0109.importtruth.cli;
 
+import io.github.kxng0109.importtruth.core.JdkIndex;
+import io.github.kxng0109.importtruth.core.LookupService;
+import io.github.kxng0109.importtruth.core.MavenResolver;
 import io.github.kxng0109.importtruth.core.PingService;
+import io.github.kxng0109.importtruth.core.SearchService;
+import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.mcp.ImportTruthServer;
+import io.github.kxng0109.importtruth.model.LibraryIndexer;
 
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ServiceLoader;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -26,9 +35,17 @@ public final class Main {
 		// later System.out writes (ours or any library's) at standard error.
 		PrintStream protocolOut = System.out;
 		System.setOut(new PrintStream(System.err, true, StandardCharsets.UTF_8));
+		Path state = Paths.get(System.getProperty("user.home"), ".importtruth");
+		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		LibraryIndexer indexer = ServiceLoader.load(LibraryIndexer.class).findFirst().orElseThrow(
+				() -> new IllegalStateException("No LibraryIndexer on the classpath"));
+		MavenResolver resolver = new MavenResolver(state);
+		JdkIndex jdk = new JdkIndex();
 		// Must match the root pom version until the build stamps it (M1).
 		PingService ping = new PingService("importtruth", "0.1.0-SNAPSHOT");
-		ImportTruthServer server = new ImportTruthServer(ping, System.in, protocolOut);
+		LookupService lookup = new LookupService(store, indexer, resolver, jdk);
+		SearchService search = new SearchService(store, indexer, resolver);
+		ImportTruthServer server = new ImportTruthServer(ping, lookup, search, System.in, protocolOut);
 		CountDownLatch stop = new CountDownLatch(1);
 		Runtime.getRuntime().addShutdownHook(new Thread(stop::countDown));
 		try {
