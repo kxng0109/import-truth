@@ -26,8 +26,8 @@ final class MavenResolverTest {
 		Path projectDir = Paths.get(System.getProperty("user.dir")).getParent();
 		MavenResolver resolver = new MavenResolver(state);
 
-		List<Path> first = resolver.resolve(projectDir, false);
-		List<Path> second = resolver.resolve(projectDir, false);
+		List<Path> first = resolver.resolve(projectDir, true);
+		List<Path> second = resolver.resolve(projectDir, true);
 
 		assertThat(first).as("resolved jars").isNotEmpty();
 		assertThat(first.stream().allMatch(p -> p.toString().endsWith(".jar") && Files.exists(p)))

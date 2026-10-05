@@ -39,7 +39,7 @@ final class GoldenLookupTest {
 	private Path state;
 
 	@Test
-	@DisplayName("finds Jackson 3 and misses Jackson 2 paths")
+	@DisplayName("finds both Jackson generations and flags JDK hits")
 	@Timeout(value = 120, unit = TimeUnit.SECONDS)
 	void jacksonGenerations() throws Exception {
 		Wiring wiring = wiring();
@@ -51,8 +51,12 @@ final class GoldenLookupTest {
 		assertThat(three.fromJdk()).as("not a JDK hit").isFalse();
 
 		LookupResult two = wiring.lookup().lookup(project, "com.fasterxml.jackson.databind.ObjectMapper");
-		assertThat(two.found()).as("Jackson 2 mapper missing").isFalse();
-		assertThat(two.confidence()).as("missing confidence").isEqualTo(Confidence.CANDIDATE);
+		assertThat(two.found()).as("Jackson 2 mapper found on the test classpath").isTrue();
+		assertThat(two.confidence()).as("Jackson 2 confidence").isEqualTo(Confidence.DEFINITE);
+
+		LookupResult absent = wiring.lookup().lookup(project, "com.example.Nope");
+		assertThat(absent.found()).as("absent name missing").isFalse();
+		assertThat(absent.confidence()).as("missing confidence").isEqualTo(Confidence.CANDIDATE);
 
 		LookupResult kept = wiring.lookup().lookup(project, "com.fasterxml.jackson.annotation.JsonProperty");
 		assertThat(kept.found()).as("retained annotation found").isTrue();

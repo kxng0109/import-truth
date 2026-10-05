@@ -26,6 +26,13 @@ import java.util.stream.Stream;
  */
 public final class MavenResolver {
 
+	/**
+	 * Fully qualified goal: short prefixes fail on machines without a warm
+	 * plugin cache. Pinned version verified 2026-10-05.
+	 */
+	static final String BUILD_CLASSPATH =
+			"org.apache.maven.plugins:maven-dependency-plugin:3.11.0:build-classpath";
+
 	private final Path stateDir;
 
 	/**
@@ -60,17 +67,17 @@ public final class MavenResolver {
 			}
 		}
 		Set<Path> union = new LinkedHashSet<>();
-		int failures = 0;
+		List<String> failures = new ArrayList<>();
 		for (Path module : modulesOf(projectDir)) {
 			Path out = stateDir.resolve("resolve").resolve(hash + "." + module.getFileName() + ".new");
 			Files.deleteIfExists(out);
-			boolean ok = runBuildClasspath(projectDir, module, out, true);
-			if (!ok && allowNetwork) {
+			ResolveOutcome outcome = runBuildClasspath(projectDir, module, out, true);
+			if (!outcome.ok() && allowNetwork) {
 				Files.deleteIfExists(out);
-				ok = runBuildClasspath(projectDir, module, out, false);
+				outcome = runBuildClasspath(projectDir, module, out, false);
 			}
-			if (!ok) {
-				failures++;
+			if (!outcome.ok()) {
+				failures.add(module.getFileName() + ": " + outcome.tail());
 				Files.deleteIfExists(out);
 				continue;
 			}
@@ -79,7 +86,8 @@ public final class MavenResolver {
 		}
 		List<Path> jars = List.copyOf(union);
 		if (jars.isEmpty()) {
-			throw new IOException("No dependencies resolved for " + projectDir + " (" + failures + " failures)");
+			throw new IOException(
+					"No dependencies resolved for " + projectDir + ": " + String.join(" | ", failures));
 		}
 		Files.writeString(cached, joinClasspath(jars), StandardCharsets.UTF_8);
 		return jars;
@@ -120,33 +128,32 @@ public final class MavenResolver {
 		}
 	}
 
-	private boolean runBuildClasspath(Path projectDir, Path module, Path out, boolean offline) throws IOException {
-		Path wrapper = findWrapper(module);
-		List<String> command = new ArrayList<>();
-		if (wrapper != null) {
-			command.addAll(List.of("cmd", "/d", "/c", wrapper.toAbsolutePath().toString()));
-		} else {
-			command.add("mvn.cmd");
-		}
+	private ResolveOutcome runBuildClasspath(Path projectDir, Path module, Path out, boolean offline)
+			throws IOException {
+		List<String> command = new ArrayList<>(launcher(findWrapper(module)));
 		command.addAll(List.of(
 				"-f", module.resolve("pom.xml").toAbsolutePath().toString(),
 				"-B", "-ntp", "-q",
 				"-Dmdep.outputFile=" + out.toAbsolutePath(),
 				"-Dmdep.includeScope=test",
-				"dependency:build-classpath"));
+				BUILD_CLASSPATH));
 		if (offline) {
 			command.add("-o");
 		}
 		Process process;
+		StringBuilder log = new StringBuilder();
 		try {
 			process = new ProcessBuilder(command).directory(projectDir.toFile()).redirectErrorStream(true).start();
 		} catch (IOException failed) {
-			return false;
+			return new ResolveOutcome(false, "cannot start " + command.get(0) + ": " + failed.getMessage());
 		}
 		try (BufferedReader reader = new BufferedReader(
 				new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-			while (reader.readLine() != null) {
-				// Drained to avoid blocking the build tool; failures surface via exit code.
+			String line;
+			while ((line = reader.readLine()) != null) {
+				if (log.length() < 2000) {
+					log.append(line).append('\n');
+				}
 			}
 		}
 		boolean finished;
@@ -160,19 +167,39 @@ public final class MavenResolver {
 			process.destroyForcibly();
 			throw new IOException("Timed out resolving " + module);
 		}
-		return process.exitValue() == 0 && Files.exists(out);
+		String tail = log.length() > 500 ? log.substring(log.length() - 500) : log.toString();
+		boolean ok = process.exitValue() == 0 && Files.exists(out);
+		return new ResolveOutcome(ok, ok ? "" : ("exit=" + process.exitValue() + " " + tail.trim()));
+	}
+
+	private record ResolveOutcome(boolean ok, String tail) {
 	}
 
 	private static Path findWrapper(Path module) {
 		Path current = module.toAbsolutePath();
+		boolean windows = System.getProperty("os.name", "").startsWith("Windows");
 		while (current != null) {
-			Path wrapper = current.resolve("mvnw.cmd");
+			Path wrapper = current.resolve(windows ? "mvnw.cmd" : "mvnw");
 			if (Files.exists(wrapper)) {
 				return wrapper;
 			}
 			current = current.getParent();
 		}
 		return null;
+	}
+
+	private static List<String> launcher(Path wrapper) {
+		boolean windows = System.getProperty("os.name", "").startsWith("Windows");
+		if (wrapper == null) {
+			return List.of(windows ? "mvn.cmd" : "mvn");
+		}
+		if (windows) {
+			return List.of("cmd", "/d", "/c", wrapper.toAbsolutePath().toString());
+		}
+		if (Files.isExecutable(wrapper)) {
+			return List.of(wrapper.toAbsolutePath().toString());
+		}
+		return List.of("sh", wrapper.toAbsolutePath().toString());
 	}
 
 	private static String joinClasspath(List<Path> jars) {
