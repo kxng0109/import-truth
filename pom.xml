@@ -33,7 +33,7 @@
     <jackson2.version>2.21.7</jackson2.version>
     <surefire.version>3.6.0</surefire.version>
     <shade.version>3.6.2</shade.version>
-    <jar.version>3.5.0</jar.version>
+    <jar.version>3.5.1</jar.version>
   </properties>
 
   <dependencyManagement>
