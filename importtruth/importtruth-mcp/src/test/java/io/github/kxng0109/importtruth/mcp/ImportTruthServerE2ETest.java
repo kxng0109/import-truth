@@ -57,7 +57,7 @@ final class ImportTruthServerE2ETest {
 							}
 						});
 		reader.setDaemon(true);
-		PingService ping = new PingService("importtruth", "0.1.0-SNAPSHOT");
+		PingService ping = new PingService("importtruth", "0.2.0-SNAPSHOT");
 		try (ImportTruthServer server = new ImportTruthServer(ping, serverIn, serverToClient)) {
 			reader.start();
 			writeLine(clientToServer, INITIALIZE);
@@ -66,7 +66,7 @@ final class ImportTruthServerE2ETest {
 			writeLine(clientToServer, CALL_PING);
 			assertThat(awaitLine(lines, "\"id\":2"))
 					.as("ping call answer")
-					.contains("importtruth 0.1.0-SNAPSHOT");
+					.contains("importtruth 0.2.0-SNAPSHOT");
 		} finally {
 			clientToServer.close();
 			serverToClient.close();

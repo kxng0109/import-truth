@@ -6,7 +6,7 @@
 
   <groupId>io.github.kxng0109</groupId>
   <artifactId>importtruth</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.2.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <name>importtruth</name>
   <description>Project-resolved API ground truth for coding agents. Java first.</description>
@@ -32,6 +32,7 @@
     <h2.version>2.5.252</h2.version>
     <surefire.version>3.6.0</surefire.version>
     <shade.version>3.6.2</shade.version>
+    <jar.version>3.5.0</jar.version>
   </properties>
 
   <dependencyManagement>
@@ -76,6 +77,11 @@
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-shade-plugin</artifactId>
           <version>${shade.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>${jar.version}</version>
         </plugin>
       </plugins>
     </pluginManagement>

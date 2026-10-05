@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test;
 @DisplayName("PingTool")
 final class PingToolTest {
 
-	private final PingTool tool = new PingTool(new PingService("importtruth", "0.1.0-SNAPSHOT"));
+	private final PingTool tool = new PingTool(new PingService("importtruth", "0.2.0-SNAPSHOT"));
 
 	@Test
 	@DisplayName("exposes ping name with empty object schema")
@@ -40,6 +40,6 @@ final class PingToolTest {
 		assertThat(result.content().get(0)).as("content item").isInstanceOf(McpSchema.TextContent.class);
 		assertThat(((McpSchema.TextContent) result.content().get(0)).text())
 				.as("identity text")
-				.isEqualTo("importtruth 0.1.0-SNAPSHOT");
+				.isEqualTo("importtruth 0.2.0-SNAPSHOT");
 	}
 }

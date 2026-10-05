@@ -15,17 +15,17 @@ final class ApiInfoTest {
 	@Test
 	@DisplayName("carries name and version")
 	void carriesNameAndVersion() {
-		ApiInfo info = new ApiInfo("importtruth", "0.1.0-SNAPSHOT");
+		ApiInfo info = new ApiInfo("importtruth", "0.2.0-SNAPSHOT");
 
 		assertThat(info.name()).as("server name").isEqualTo("importtruth");
-		assertThat(info.version()).as("server version").isEqualTo("0.1.0-SNAPSHOT");
+		assertThat(info.version()).as("server version").isEqualTo("0.2.0-SNAPSHOT");
 	}
 
 	@Test
 	@DisplayName("rejects null name")
 	@SuppressWarnings("DataFlowIssue")
 	void rejectsNullName() {
-		assertThatThrownBy(() -> new ApiInfo(null, "0.1.0-SNAPSHOT"))
+		assertThatThrownBy(() -> new ApiInfo(null, "0.2.0-SNAPSHOT"))
 				.as("null name rejection")
 				.isInstanceOf(NullPointerException.class);
 	}
@@ -42,7 +42,7 @@ final class ApiInfoTest {
 	@Test
 	@DisplayName("rejects blank name")
 	void rejectsBlankName() {
-		assertThatThrownBy(() -> new ApiInfo("  ", "0.1.0-SNAPSHOT"))
+		assertThatThrownBy(() -> new ApiInfo("  ", "0.2.0-SNAPSHOT"))
 				.as("blank name rejection")
 				.isInstanceOf(IllegalArgumentException.class);
 	}

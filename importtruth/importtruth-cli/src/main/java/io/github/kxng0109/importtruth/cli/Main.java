@@ -41,8 +41,8 @@ public final class Main {
 				() -> new IllegalStateException("No LibraryIndexer on the classpath"));
 		MavenResolver resolver = new MavenResolver(state);
 		JdkIndex jdk = new JdkIndex();
-		// Must match the root pom version until the build stamps it (M1).
-		PingService ping = new PingService("importtruth", "0.1.0-SNAPSHOT");
+		// Version stamped by the build; never hardcoded.
+		PingService ping = new PingService("importtruth", version());
 		LookupService lookup = new LookupService(store, indexer, resolver, jdk);
 		SearchService search = new SearchService(store, indexer, resolver);
 		ImportTruthServer server = new ImportTruthServer(ping, lookup, search, System.in, protocolOut);
@@ -53,5 +53,15 @@ public final class Main {
 		} finally {
 			server.close();
 		}
+	}
+
+	/**
+	 * Reads the build-stamped version.
+	 *
+	 * @return implementation version, or a development marker outside the jar
+	 */
+	private static String version() {
+		String stamped = Main.class.getPackage().getImplementationVersion();
+		return stamped != null ? stamped : "0.0.0-dev";
 	}
 }

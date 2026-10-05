@@ -17,17 +17,17 @@ final class PingServiceTest {
 	@Test
 	@DisplayName("returns configured name and version")
 	void returnsConfiguredNameAndVersion() {
-		ApiInfo info = new PingService("importtruth", "0.1.0-SNAPSHOT").ping();
+		ApiInfo info = new PingService("importtruth", "0.2.0-SNAPSHOT").ping();
 
 		assertThat(info.name()).as("server name").isEqualTo("importtruth");
-		assertThat(info.version()).as("server version").isEqualTo("0.1.0-SNAPSHOT");
+		assertThat(info.version()).as("server version").isEqualTo("0.2.0-SNAPSHOT");
 	}
 
 	@Test
 	@DisplayName("rejects null name")
 	@SuppressWarnings("DataFlowIssue")
 	void rejectsNullName() {
-		assertThatThrownBy(() -> new PingService(null, "0.1.0-SNAPSHOT"))
+		assertThatThrownBy(() -> new PingService(null, "0.2.0-SNAPSHOT"))
 				.as("null name rejection")
 				.isInstanceOf(NullPointerException.class);
 	}
