@@ -6,7 +6,10 @@ import io.modelcontextprotocol.spec.McpSchema;
 
 import io.github.kxng0109.importtruth.core.PingService;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.Map;
+import java.util.Properties;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -17,7 +20,7 @@ import org.junit.jupiter.api.Test;
 @DisplayName("PingTool")
 final class PingToolTest {
 
-	private final PingTool tool = new PingTool(new PingService("importtruth", "0.2.0-SNAPSHOT"));
+	private final PingTool tool = new PingTool(new PingService("importtruth", projectVersion()));
 
 	@Test
 	@DisplayName("exposes ping name with empty object schema")
@@ -40,6 +43,17 @@ final class PingToolTest {
 		assertThat(result.content().get(0)).as("content item").isInstanceOf(McpSchema.TextContent.class);
 		assertThat(((McpSchema.TextContent) result.content().get(0)).text())
 				.as("identity text")
-				.isEqualTo("importtruth 0.2.0-SNAPSHOT");
+				.isEqualTo("importtruth " + projectVersion());
+	}
+
+	private static String projectVersion() {
+		Properties props = new Properties();
+		try (InputStream in = PingToolTest.class.getResourceAsStream("/version.properties")) {
+			assertThat(in).as("version resource present").isNotNull();
+			props.load(in);
+		} catch (IOException failure) {
+			throw new AssertionError("Cannot read version", failure);
+		}
+		return props.getProperty("version");
 	}
 }

@@ -5,10 +5,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.github.kxng0109.importtruth.core.PingService;
 
 import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Properties;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -57,7 +60,7 @@ final class ImportTruthServerE2ETest {
 							}
 						});
 		reader.setDaemon(true);
-		PingService ping = new PingService("importtruth", "0.2.0-SNAPSHOT");
+		PingService ping = new PingService("importtruth", projectVersion());
 		try (ImportTruthServer server = new ImportTruthServer(ping, serverIn, serverToClient)) {
 			reader.start();
 			writeLine(clientToServer, INITIALIZE);
@@ -66,7 +69,7 @@ final class ImportTruthServerE2ETest {
 			writeLine(clientToServer, CALL_PING);
 			assertThat(awaitLine(lines, "\"id\":2"))
 					.as("ping call answer")
-					.contains("importtruth 0.2.0-SNAPSHOT");
+					.contains("importtruth " + projectVersion());
 		} finally {
 			clientToServer.close();
 			serverToClient.close();
@@ -77,6 +80,17 @@ final class ImportTruthServerE2ETest {
 	private static void writeLine(PipedOutputStream out, String frame) throws Exception {
 		out.write((frame + "\n").getBytes(StandardCharsets.UTF_8));
 		out.flush();
+	}
+
+	private static String projectVersion() {
+		Properties props = new Properties();
+		try (InputStream in = ImportTruthServerE2ETest.class.getResourceAsStream("/version.properties")) {
+			assertThat(in).as("version resource present").isNotNull();
+			props.load(in);
+		} catch (IOException failure) {
+			throw new AssertionError("Cannot read version", failure);
+		}
+		return props.getProperty("version");
 	}
 
 	private static String awaitLine(BlockingQueue<String> lines, String fragment) throws Exception {
