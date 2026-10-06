@@ -69,7 +69,9 @@ public final class MavenResolver implements DependencyResolver {
 		}
 		Set<Path> union = new LinkedHashSet<>();
 		List<String> failures = new ArrayList<>();
+		int attempted = 0;
 		for (Path module : modulesOf(projectDir)) {
+			attempted++;
 			Path out = stateDir.resolve("resolve").resolve(hash + "." + module.getFileName() + ".new");
 			Files.deleteIfExists(out);
 			ResolveOutcome outcome = runBuildClasspath(projectDir, module, out, true);
@@ -86,7 +88,7 @@ public final class MavenResolver implements DependencyResolver {
 			Files.deleteIfExists(out);
 		}
 		List<Path> jars = List.copyOf(union);
-		if (jars.isEmpty()) {
+		if (jars.isEmpty() && !failures.isEmpty() && failures.size() >= attempted) {
 			throw new IOException(
 					"No dependencies resolved for " + projectDir + ": " + String.join(" | ", failures));
 		}

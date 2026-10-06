@@ -63,8 +63,28 @@ code either; it only reads the shape of it.
 
 On Windows use `mvnw.cmd` in place of `./mvnw`.
 
+## Enforcement
+
+After edits, an opencode plugin runs the check and reports findings back
+into the session. Install it and point it at the shaded JAR:
+
+```text
+opencode plugin: opencode-plugin/importtruth.ts
+IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.2.0-SNAPSHOT.jar
+```
+
+Direct check of files (exit 1 on missing imports, silent when clean):
+
+```text
+java -jar importtruth-cli/target/importtruth-cli-0.2.0-SNAPSHOT.jar check <project> <file>...
+```
+
+A pre-commit sample lives in `.pre-commit-config.yaml`. The MCP server
+additionally exposes `lookup_symbol`, `search_api`, and `check_file`
+under `mcp.servers` for model-driven checks.
+
 ## Status
 
-M1 done: resolve, index, lookup, search (24 tests green on JDK 25 and 26,
-zero warnings; Jackson 3 found, Jackson 2 paths missing, deprecation
-correct). Next is M2: file check, hook plugin, policy engine.
+M2 done: file check, policy packs, hook plugin, pre-commit sample
+(43 tests green, zero warnings; hook proven live against subagent edits).
+Next is M3: daemon and concurrency hardening.

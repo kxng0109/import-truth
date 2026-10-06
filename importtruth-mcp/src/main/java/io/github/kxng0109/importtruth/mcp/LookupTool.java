@@ -75,17 +75,17 @@ public final class LookupTool {
 		}
 		List<String> lines = new ArrayList<>();
 		if (!answer.found()) {
-			lines.add("NOT_FOUND " + answer.confidence().name().toLowerCase() + " " + name);
+			lines.add("NOT_FOUND " + answer.confidence().name() + " " + name);
 			for (String suggestion : answer.suggestions()) {
 				lines.add("maybe: " + suggestion);
 			}
 		} else if (answer.fromJdk()) {
 			lines.add("FOUND definite " + name + " (jdk)");
 		} else {
-			lines.add("FOUND " + answer.confidence().name().toLowerCase() + " " + name);
+			lines.add("FOUND " + answer.confidence().name() + " " + name);
 			for (Symbol match : answer.matches()) {
 				StringBuilder row = new StringBuilder("match: ").append(match.fqn())
-						.append(" (").append(match.kind().name().toLowerCase()).append(')');
+						.append(" (").append(match.kind().name()).append(')');
 				if (match.signature() != null) {
 					row.append(' ').append(match.signature());
 				}

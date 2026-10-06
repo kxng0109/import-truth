@@ -76,9 +76,9 @@ final class GoldenLookupTest {
 		SearchTool search = new SearchTool(wiring.search());
 
 		String found = textOf(lookup.call(Map.of("projectPath", project, "symbol", "tools.jackson.databind.JsonNode")));
-		assertThat(found).as("found line").startsWith("FOUND definite tools.jackson.databind.JsonNode");
+		assertThat(found).as("found line").startsWith("FOUND DEFINITE tools.jackson.databind.JsonNode");
 		String missing = textOf(lookup.call(Map.of("projectPath", project, "symbol", "com.example.Nope")));
-		assertThat(missing).as("missing line").startsWith("NOT_FOUND candidate com.example.Nope");
+		assertThat(missing).as("missing line").startsWith("NOT_FOUND CANDIDATE com.example.Nope");
 		String hits = textOf(search.call(Map.of("projectPath", project, "query", "ObjectMapper")));
 		assertThat(hits).as("search hits").contains("tools.jackson.databind.ObjectMapper");
 		String bad = textOf(lookup.call(Map.of("projectPath", project)));

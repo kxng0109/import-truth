@@ -39,6 +39,29 @@ public final class PolicyValidator {
 		return disabled;
 	}
 
+	/**
+	 * Returns the rules that survive validation.
+	 *
+	 * @param pack             pack under test, never null
+	 * @param packageResolves  true when a package exists, never null
+	 * @param typeResolves     true when a type exists, never null
+	 * @return active rules, never null
+	 * @throws NullPointerException if any argument is {@code null}
+	 */
+	public static List<PolicyRule> activeRules(
+			PolicyPack pack, Predicate<String> packageResolves, Predicate<String> typeResolves) {
+		Objects.requireNonNull(pack, "pack");
+		Objects.requireNonNull(packageResolves, "packageResolves");
+		Objects.requireNonNull(typeResolves, "typeResolves");
+		List<PolicyRule> active = new ArrayList<>();
+		for (PolicyRule rule : pack.rules()) {
+			if (check(rule, packageResolves, typeResolves).isEmpty()) {
+				active.add(rule);
+			}
+		}
+		return active;
+	}
+
 	private static Optional<RuleIssue> check(
 			PolicyRule rule, Predicate<String> packageResolves, Predicate<String> typeResolves) {
 		return switch (rule.kind()) {

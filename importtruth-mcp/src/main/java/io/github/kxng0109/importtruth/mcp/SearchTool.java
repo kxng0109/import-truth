@@ -75,7 +75,7 @@ public final class SearchTool {
 		try {
 			for (Symbol match : search.search(Paths.get(projectPath), text, limit)) {
 				StringBuilder row = new StringBuilder("hit: ").append(match.fqn())
-						.append(" (").append(match.kind().name().toLowerCase()).append(')');
+						.append(" (").append(match.kind().name()).append(')');
 				if (match.deprecated()) {
 					row.append(" deprecated");
 				}

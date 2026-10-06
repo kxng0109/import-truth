@@ -1,0 +1,8 @@
+repos:
+  - repo: local
+    hooks:
+      - id: importtruth-check
+        name: importtruth import check
+        entry: java -jar importtruth-cli/target/importtruth-cli-0.2.0-SNAPSHOT.jar check .
+        language: system
+        types: [java]
