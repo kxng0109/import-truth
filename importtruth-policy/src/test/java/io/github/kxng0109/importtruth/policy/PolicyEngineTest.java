@@ -1,6 +1,7 @@
 package io.github.kxng0109.importtruth.policy;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.kxng0109.importtruth.model.PolicyHit;
 import io.github.kxng0109.importtruth.model.PolicyPack;
@@ -69,5 +70,33 @@ final class PolicyEngineTest {
 	@DisplayName("ignores unrelated names")
 	void ignoresUnrelated() {
 		assertThat(engine.evaluate("java.util.List", true)).as("unrelated silent").isEmpty();
+	}
+
+	@Test
+	@DisplayName("matches exact package preference")
+	void matchesExactPackage() {
+		assertThat(engine.evaluate("com.fasterxml.jackson.databind", true))
+				.as("exact package fires")
+				.isPresent();
+	}
+
+	@Test
+	@DisplayName("preserves member suffix on renames")
+	void preservesMemberSuffix() {
+		assertThat(engine.evaluate("com.fasterxml.jackson.databind.ObjectMapper.Writer", true))
+				.as("member rename fires")
+				.hasValueSatisfying(hit -> assertThat(hit.suggestion())
+						.as("suffixed suggestion")
+						.isEqualTo("use tools.jackson.databind.ObjectMapper.Writer"));
+	}
+
+	@Test
+	@DisplayName("rejects null targets and skips blanks")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullAndBlank() {
+		assertThatThrownBy(() -> engine.evaluate(null, true))
+				.as("null rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThat(engine.evaluate("  ", true)).as("blank silent").isEmpty();
 	}
 }

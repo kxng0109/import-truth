@@ -13,6 +13,7 @@ import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 import io.modelcontextprotocol.spec.McpSchema.TextContent;
 
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -33,6 +34,7 @@ import io.github.kxng0109.importtruth.model.LookupResult;
  * paths missing, annotations retained, JDK hits flagged.
  */
 @DisplayName("Golden lookups")
+@Tag("slow")
 final class GoldenLookupTest {
 
 	@TempDir

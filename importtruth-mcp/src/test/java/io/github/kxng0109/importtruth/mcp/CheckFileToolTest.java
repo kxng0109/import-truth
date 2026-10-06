@@ -1,6 +1,7 @@
 package io.github.kxng0109.importtruth.mcp;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.kxng0109.importtruth.core.DependencyResolver;
 import io.github.kxng0109.importtruth.core.JdkIndex;
@@ -11,10 +12,12 @@ import io.github.kxng0109.importtruth.model.SymbolKind;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 import io.modelcontextprotocol.spec.McpSchema.TextContent;
 
+import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarOutputStream;
@@ -68,6 +71,132 @@ final class CheckFileToolTest {
 		assertThat(result.isError()).as("error flag").isTrue();
 	}
 
+	@Test
+	@DisplayName("rejects null, blank, and mistyped arguments")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullAndBlank() {
+		CheckFileTool tool = tool();
+
+		assertThatThrownBy(() -> tool.call(null)).as("null rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThat(tool.call(Map.of("projectPath", " ", "filePath", "x")).isError())
+				.as("blank project rejected")
+				.isTrue();
+		assertThat(tool.call(Map.of("projectPath", project.toString(), "filePath", " ")).isError())
+				.as("blank file rejected")
+				.isTrue();
+		assertThat(tool.call(Map.of("projectPath", project.toString(), "filePath", 42)).isError())
+				.as("non-string file rejected")
+				.isTrue();
+		assertThat(tool.call(Map.of("projectPath", 42, "filePath", "x")).isError())
+				.as("non-string project rejected")
+				.isTrue();
+		assertThat(tool.call(Map.of("filePath", "x")).isError()).as("missing project rejected").isTrue();
+	}
+
+	@Test
+	@DisplayName("validates pack targets against the JDK")
+	void validatesJdkTargets() throws Exception {
+		Files.write(project.resolve(".importtruth.yml"),
+				"renames:\n  - from: com.example.Old\n    to: java.util.List\n".getBytes(StandardCharsets.UTF_8));
+		CheckFileTool tool = tool();
+		Path clean = file("Clean.java",
+				"package com.other; import java.util.List; public class Clean { List<String> items; }");
+
+		assertThat(textOf(tool.call(Map.of("projectPath", project.toString(), "filePath", clean.toString()))))
+				.as("jdk target keeps the rule check honest")
+				.isEqualTo("clean");
+	}
+
+	@Test
+	@DisplayName("matches sub-packages of own code")
+	void matchesOwnSubPackages() throws Exception {
+		Path own = project.resolve("src/main/java/com/fasterxml/jackson/databind/impl");
+		Files.createDirectories(own);
+		Files.write(own.resolve("Bar.java"),
+				"package com.fasterxml.jackson.databind.impl; public class Bar { }".getBytes(StandardCharsets.UTF_8));
+		CheckFileTool tool = tool();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+
+		assertThat(textOf(tool.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()))))
+				.as("sub-package keeps the rule alive")
+				.contains("POLICY");
+	}
+	void reportsUnhealthyAndFailures() throws Exception {
+		CheckFileTool tool = tool();
+		Path broken = file("Broken.java",
+				"package com.other; import java.util.List; public class Broken { void x( { } }");
+
+		assertThat(textOf(tool.call(Map.of("projectPath", project.toString(), "filePath", broken.toString()))))
+				.as("unhealthy file clean")
+				.isEqualTo("clean");
+
+		CheckFileTool failing = failingTool();
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+		CallToolResult result =
+				failing.call(Map.of("projectPath", project.toString(), "filePath", missing.toString()));
+
+		assertThat(result.isError()).as("resolver failure flagged").isTrue();
+	}
+
+	@Test
+	@DisplayName("prefers the project override pack")
+	void prefersOverridePack() throws Exception {
+		Files.write(project.resolve(".importtruth.yml"),
+				"allow:\n  - package: com.example.keep\n".getBytes(StandardCharsets.UTF_8));
+		CheckFileTool tool = tool();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+
+		assertThat(textOf(tool.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()))))
+				.as("override pack drops the rename rule")
+				.isEqualTo("clean");
+	}
+
+	@Test
+	@DisplayName("keeps own packages and survives corrupt indexes")
+	void keepsOwnAndToleratesCorruption() throws Exception {
+		Path own = project.resolve("src/main/java/com/fasterxml/jackson/databind");
+		Files.createDirectories(own);
+		Files.write(own.resolve("Foo.java"),
+				"package com.fasterxml.jackson.databind; public class Foo { }".getBytes(StandardCharsets.UTF_8));
+		CheckFileTool tool = tool();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+
+		assertThat(textOf(tool.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()))))
+				.as("own package keeps the rule alive")
+				.contains("POLICY");
+
+		try (var indexes = Files.list(state.resolve("index"))) {
+			for (Path db : indexes.filter(p -> p.toString().endsWith(".mv.db")).toList()) {
+				Files.write(db, "corrupt".getBytes(StandardCharsets.UTF_8));
+			}
+		}
+		CallToolResult result =
+				tool.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()));
+
+		assertThat(result.isError()).as("corrupt index flagged").isTrue();
+	}
+
+	@Test
+	@DisplayName("falls back to file names outside the project")
+	void fallsBackOutsideProject() throws Exception {
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+
+		String line = textOf(tool().call(
+				Map.of("projectPath", "rel-proj", "filePath", legacy.toAbsolutePath().toString())));
+
+		assertThat(line).as("bare file name fallback").startsWith("Legacy.java:");
+	}
+
 	private CheckFileTool tool() {
 		try {
 			Path jar = project.resolve("dep.jar");
@@ -81,6 +210,19 @@ final class CheckFileToolTest {
 							"", false),
 					new Symbol("tools.jackson.databind.ObjectMapper", SymbolKind.CLASS, null, null, false, "", false));
 			DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
+			return new CheckFileTool(store, indexer, resolver, new JdkIndex());
+		} catch (Exception failure) {
+			throw new AssertionError("Fixture setup failed", failure);
+		}
+	}
+
+	private CheckFileTool failingTool() {
+		try {
+			JarIndexStore store = new JarIndexStore(state.resolve("failing-index"));
+			LibraryIndexer indexer = jarFile -> List.of();
+			DependencyResolver resolver = (projectDir, allowNetwork) -> {
+				throw new IOException("no network");
+			};
 			return new CheckFileTool(store, indexer, resolver, new JdkIndex());
 		} catch (Exception failure) {
 			throw new AssertionError("Fixture setup failed", failure);

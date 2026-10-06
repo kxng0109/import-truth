@@ -114,7 +114,7 @@ public final class CheckFileTool {
 		PolicyEngine policy = loadPack(projectDir);
 		CheckResult result = check.check(projectDir, file);
 		List<Finding> findings = new ArrayList<>(result.findings());
-		if (result.healthy() && policy != null) {
+		if (result.healthy()) {
 			for (ImportVerdict verdict : result.verdicts()) {
 				if (!verdict.resolved()) {
 					continue;

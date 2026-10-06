@@ -3,6 +3,7 @@ package io.github.kxng0109.importtruth.core;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -150,20 +151,18 @@ public final class MavenResolver implements DependencyResolver {
 		} catch (IOException failed) {
 			return new ResolveOutcome(false, "cannot start " + command.get(0) + ": " + failed.getMessage());
 		}
-		try (BufferedReader reader = new BufferedReader(
-				new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-			String line;
-			while ((line = reader.readLine()) != null) {
-				if (log.length() < 2000) {
-					log.append(line).append('\n');
-				}
-			}
-		}
+		// Drain on a daemon thread: the blocking stream read must never
+		// trap the worker before the interruptible wait below.
+		Thread drain = new Thread(() -> drainTo(process.getInputStream(), log));
+		drain.setDaemon(true);
+		drain.start();
 		boolean finished;
 		try {
 			finished = process.waitFor(120, TimeUnit.SECONDS);
+			drain.join(10_000);
 		} catch (InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
+			process.destroyForcibly();
 			throw new IOException("Interrupted resolving " + module, interrupted);
 		}
 		if (!finished) {
@@ -178,9 +177,33 @@ public final class MavenResolver implements DependencyResolver {
 	private record ResolveOutcome(boolean ok, String tail) {
 	}
 
+	/**
+	 * Copies a process stream into the tail buffer, capping its size.
+	 * Best effort: a torn-down stream ends the copy silently.
+	 *
+	 * @param in  stream to drain, never null
+	 * @param log tail buffer, never null
+	 */
+	static void drainTo(InputStream in, StringBuilder log) {
+		try (BufferedReader reader = new BufferedReader(
+				new InputStreamReader(in, StandardCharsets.UTF_8))) {
+			String line;
+			while ((line = reader.readLine()) != null) {
+				if (log.length() < 2000) {
+					log.append(line).append('\n');
+				}
+			}
+		} catch (IOException ignored) {
+			// Stream torn down with the process; the tail is best effort.
+		}
+	}
+
 	private static Path findWrapper(Path module) {
+		return findWrapper(module, isWindows());
+	}
+
+	static Path findWrapper(Path module, boolean windows) {
 		Path current = module.toAbsolutePath();
-		boolean windows = System.getProperty("os.name", "").startsWith("Windows");
 		while (current != null) {
 			Path wrapper = current.resolve(windows ? "mvnw.cmd" : "mvnw");
 			if (Files.exists(wrapper)) {
@@ -192,17 +215,21 @@ public final class MavenResolver implements DependencyResolver {
 	}
 
 	private static List<String> launcher(Path wrapper) {
-		boolean windows = System.getProperty("os.name", "").startsWith("Windows");
+		return launcher(wrapper, isWindows());
+	}
+
+	static List<String> launcher(Path wrapper, boolean windows) {
 		if (wrapper == null) {
 			return List.of(windows ? "mvn.cmd" : "mvn");
 		}
 		if (windows) {
 			return List.of("cmd", "/d", "/c", wrapper.toAbsolutePath().toString());
 		}
-		if (Files.isExecutable(wrapper)) {
-			return List.of(wrapper.toAbsolutePath().toString());
-		}
 		return List.of("sh", wrapper.toAbsolutePath().toString());
+	}
+
+	private static boolean isWindows() {
+		return System.getProperty("os.name", "").startsWith("Windows");
 	}
 
 	private static String joinClasspath(List<Path> jars) {

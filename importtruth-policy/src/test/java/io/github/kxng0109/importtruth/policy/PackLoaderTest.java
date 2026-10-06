@@ -52,6 +52,35 @@ final class PackLoaderTest {
 				.isInstanceOf(IOException.class);
 	}
 
+	@Test
+	@DisplayName("rejects malformed sections and values")
+	void rejectsMalformed() {
+		assertThatThrownBy(() -> PackLoader.load("bad", bytes("prefer: oops\n")))
+				.as("non-list section rejected")
+				.isInstanceOf(IOException.class);
+		assertThatThrownBy(() -> PackLoader.load("bad", bytes("prefer:\n  - oops\n")))
+				.as("non-mapping entry rejected")
+				.isInstanceOf(IOException.class);
+		assertThatThrownBy(() -> PackLoader.load("bad", bytes("allow:\n  - 42\n")))
+				.as("non-text allow rejected")
+				.isInstanceOf(IOException.class);
+		assertThatThrownBy(() -> PackLoader.load("bad", bytes("prefer:\n  - over: 42\n    package: a.b\n")))
+				.as("non-text value rejected")
+				.isInstanceOf(IOException.class);
+		assertThatThrownBy(() -> PackLoader.load("  ", bytes("prefer: []\n")))
+				.as("blank name rejected")
+				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	@DisplayName("loads map-style allow entries")
+	void loadsMapAllows() throws Exception {
+		PolicyPack pack = PackLoader.load("test", bytes("allow:\n  - package: com.example.keep\n"));
+
+		assertThat(pack.rules()).as("one allow rule").hasSize(1);
+		assertThat(pack.rules().get(0).kind()).as("allow kind").isEqualTo(PolicyRuleKind.ALLOW);
+	}
+
 	private static InputStream bytes(String text) {
 		return new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8));
 	}

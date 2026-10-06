@@ -1,23 +1,33 @@
 package io.github.kxng0109.importtruth.cli;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.kxng0109.importtruth.core.DependencyResolver;
 import io.github.kxng0109.importtruth.core.JdkIndex;
 import io.github.kxng0109.importtruth.core.MavenResolver;
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
+import io.github.kxng0109.importtruth.model.Symbol;
+import io.github.kxng0109.importtruth.model.SymbolKind;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.jar.JarOutputStream;
+import java.util.zip.ZipEntry;
+import java.nio.file.Paths;
+import java.util.List;
 import java.util.ServiceLoader;
 
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -38,6 +48,7 @@ final class CheckCommandTest {
 	private Path files;
 
 	@Test
+	@Tag("slow")
 	@DisplayName("silent clean, loud missing, policy rename")
 	@Timeout(value = 120, unit = TimeUnit.SECONDS)
 	void goldenChecks() throws Exception {
@@ -72,6 +83,182 @@ final class CheckCommandTest {
 	private int run(CheckCommand command, Path project, Path file) throws Exception {
 		ByteArrayOutputStream sink = new ByteArrayOutputStream();
 		return command.run(new PrintStream(sink, true, StandardCharsets.UTF_8), System.err, project, file);
+	}
+
+	@Test
+	@DisplayName("rejects null sinks and paths")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNulls() throws Exception {
+		CheckCommand command = fakeCommand();
+		Path file = file("Null.java", "package com.other; public class Null { }");
+
+		assertThatThrownBy(() -> command.run(null, System.err, files, file)).as("null out")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> command.run(System.out, System.err, null, file)).as("null project")
+				.isInstanceOf(NullPointerException.class);
+	}
+
+	@Test
+	@DisplayName("stays silent on broken files")
+	void staysSilentOnBroken() throws Exception {
+		CheckCommand command = fakeCommand();
+		Path broken = file("Broken.java",
+				"package com.other; import java.util.List; public class Broken { void x( { } }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err, files, broken);
+
+		assertThat(exit).as("broken exit").isEqualTo(0);
+		assertThat(out.toString(StandardCharsets.UTF_8)).as("broken silent").isEmpty();
+	}
+
+	@Test
+	@DisplayName("prefers the project override pack")
+	void prefersOverridePack() throws Exception {
+		Files.write(files.resolve(".importtruth.yml"),
+				"allow:\n  - package: com.example.keep\n".getBytes(StandardCharsets.UTF_8));
+		CheckCommand command = fakeCommand();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err, files, legacy);
+
+		assertThat(exit).as("override exit").isEqualTo(0);
+		assertThat(out.toString(StandardCharsets.UTF_8)).as("rename rule dropped").doesNotContain("POLICY");
+	}
+
+	@Test
+	@DisplayName("warns when pack targets go missing")
+	void warnsOnDisabledRules() throws Exception {
+		CheckCommand command = emptyCommand();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		ByteArrayOutputStream err = new ByteArrayOutputStream();
+
+		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8),
+				new PrintStream(err, true, StandardCharsets.UTF_8), files, legacy);
+
+		assertThat(err.toString(StandardCharsets.UTF_8)).as("disabled warning").contains("disabled");
+		assertThat(exit).as("missing exit").isEqualTo(1);
+	}
+
+	@Test
+	@DisplayName("keeps own packages and fails loudly on corrupt indexes")
+	void keepsOwnAndFailsLoudly() throws Exception {
+		Path own = files.resolve("src/main/java/com/fasterxml/jackson/databind");
+		Files.createDirectories(own);
+		Files.write(own.resolve("Foo.java"),
+				"package com.fasterxml.jackson.databind; public class Foo { }".getBytes(StandardCharsets.UTF_8));
+		CheckCommand command = fakeCommand();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err, files, legacy);
+
+		assertThat(out.toString(StandardCharsets.UTF_8)).as("own package keeps the rule").contains("POLICY");
+		assertThat(exit).as("policy exit stays zero").isEqualTo(0);
+
+		try (var indexes = Files.list(state.resolve("fake-index"))) {
+			for (Path db : indexes.filter(p -> p.toString().endsWith(".mv.db")).toList()) {
+				Files.write(db, "corrupt".getBytes(StandardCharsets.UTF_8));
+			}
+		}
+
+		assertThatThrownBy(() -> command.run(
+				new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8), System.err, files,
+				legacy)).as("corrupt index throws").isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("validates pack targets against the JDK")
+	void validatesJdkTargets() throws Exception {
+		Files.write(files.resolve(".importtruth.yml"),
+				"renames:\n  - from: com.example.Old\n    to: java.util.List\n".getBytes(StandardCharsets.UTF_8));
+		CheckCommand command = fakeCommand();
+		Path clean = file("Clean.java",
+				"package com.other; import java.util.List; public class Clean { List<String> items; }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err, files, clean);
+
+		assertThat(exit).as("clean exit").isEqualTo(0);
+		assertThat(out.toString(StandardCharsets.UTF_8)).as("clean silent").isEmpty();
+	}
+
+	@Test
+	@DisplayName("matches sub-packages of own code")
+	void matchesOwnSubPackages() throws Exception {
+		Path own = files.resolve("src/main/java/com/fasterxml/jackson/databind/impl");
+		Files.createDirectories(own);
+		Files.write(own.resolve("Bar.java"),
+				"package com.fasterxml.jackson.databind.impl; public class Bar { }".getBytes(StandardCharsets.UTF_8));
+		CheckCommand command = fakeCommand();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err, files, legacy);
+
+		assertThat(exit).as("policy exit stays zero").isEqualTo(0);
+		assertThat(out.toString(StandardCharsets.UTF_8)).as("sub-package keeps the rule")
+				.contains("POLICY");
+	}
+
+	@Test
+	@DisplayName("falls back to file names outside the project")
+	void fallsBackOutsideProject() throws Exception {		CheckCommand command = fakeCommand();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err,
+				Paths.get("rel-proj"), legacy.toAbsolutePath());
+
+		assertThat(exit).as("policy exit stays zero").isEqualTo(0);
+		assertThat(out.toString(StandardCharsets.UTF_8)).as("bare file name fallback")
+				.contains("Legacy.java:");
+	}
+
+	private CheckCommand fakeCommand() throws Exception {
+		Path jar = files.resolve("fake-dep.jar");
+		if (!Files.exists(jar)) {
+			try (OutputStream out = Files.newOutputStream(jar);
+					JarOutputStream zip = new JarOutputStream(out)) {
+				zip.putNextEntry(new ZipEntry("META-INF/"));
+				zip.closeEntry();
+			}
+		}
+		JarIndexStore store = new JarIndexStore(state.resolve("fake-index"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.fasterxml.jackson.databind.ObjectMapper", SymbolKind.CLASS, null, null, false,
+						"", false),
+				new Symbol("tools.jackson.databind.ObjectMapper", SymbolKind.CLASS, null, null, false, "", false));
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
+		return new CheckCommand(store, indexer, resolver, new JdkIndex());
+	}
+
+	private CheckCommand emptyCommand() throws Exception {
+		Path jar = files.resolve("fake-dep.jar");
+		if (!Files.exists(jar)) {
+			try (OutputStream out = Files.newOutputStream(jar);
+					JarOutputStream zip = new JarOutputStream(out)) {
+				zip.putNextEntry(new ZipEntry("META-INF/"));
+				zip.closeEntry();
+			}
+		}
+		JarIndexStore store = new JarIndexStore(state.resolve("empty-index"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Unrelated", SymbolKind.CLASS, null, null, false, "", false));
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
+		return new CheckCommand(store, indexer, resolver, new JdkIndex());
 	}
 
 	private CheckCommand command() throws Exception {

@@ -60,6 +60,9 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 	private static Map<String, byte[]> chooseEntries(ZipFile zip) throws IOException {
 		Map<String, byte[]> base = new HashMap<>();
 		Map<String, Versioned> versioned = new HashMap<>();
+		// Like a real class loader, never look above the running version:
+		// an incompatible newer entry must not shadow compatible ones.
+		int runtime = Runtime.version().feature();
 		int count = 0;
 		Enumeration<? extends ZipEntry> entries = zip.entries();
 		while (entries.hasMoreElements()) {
@@ -69,7 +72,7 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 				throw new IOException("Too many entries in " + zip.getName());
 			}
 			String name = entry.getName();
-			if (entry.isDirectory() || !name.endsWith(".class") || entry.getSize() < 0) {
+			if (entry.isDirectory() || !name.endsWith(".class")) {
 				continue;
 			}
 			if (name.equals("module-info.class") || name.endsWith("/package-info.class")) {
@@ -88,11 +91,11 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 				} catch (NumberFormatException notVersioned) {
 					continue;
 				}
-				if (release < 9) {
+				if (release < 9 || release > runtime) {
 					continue;
 				}
 				String key = name.substring(slash + 1);
-				if (!key.endsWith(".class") || key.equals("module-info.class")) {
+				if (key.equals("module-info.class")) {
 					continue;
 				}
 				Versioned current = versioned.get(key);
@@ -103,12 +106,8 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 				base.put(name, bytes);
 			}
 		}
-		int runtime = Runtime.version().feature();
 		for (Map.Entry<String, Versioned> entry : versioned.entrySet()) {
-			Versioned candidate = entry.getValue();
-			if (candidate.release() <= runtime) {
-				base.put(entry.getKey(), candidate.bytes());
-			}
+			base.put(entry.getKey(), entry.getValue().bytes());
 		}
 		return base;
 	}
@@ -147,8 +146,8 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 	private static final class TypeCollector extends ClassVisitor {
 
 		private final List<Symbol> symbols;
-		private String internalName = "";
 		private int access;
+		private boolean visible;
 		private final Deprecation deprecation = new Deprecation();
 		private String parentFqn = "";
 
@@ -165,8 +164,8 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 				String signature,
 				String superName,
 				String[] interfaces) {
-			this.internalName = name;
 			this.access = access;
+			this.visible = isPublicApi(access) && !isCompilerMade(access);
 			this.parentFqn = name.replace('/', '.');
 			if ((access & Opcodes.ACC_DEPRECATED) != 0) {
 				deprecation.deprecated = true;
@@ -185,7 +184,8 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 		@Override
 		public MethodVisitor visitMethod(
 				int access, String name, String descriptor, String signature, String[] exceptions) {
-			if (!isPublicApi(access) || isCompilerMade(access) || parentFqn.isEmpty()) {
+			// ASM always calls visit() before members, so the parent name is set.
+			if (!visible || !isPublicApi(access) || isCompilerMade(access)) {
 				return null;
 			}
 			return new MemberCollector(access, name, descriptor);
@@ -194,7 +194,8 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 		@Override
 		public FieldVisitor visitField(
 				int access, String name, String descriptor, String signature, Object value) {
-			if (!isPublicApi(access) || isCompilerMade(access) || parentFqn.isEmpty()) {
+			// ASM always calls visit() before members, so the parent name is set.
+			if (!visible || !isPublicApi(access) || isCompilerMade(access)) {
 				return null;
 			}
 			return new MemberFieldCollector(access, name, descriptor);
@@ -202,10 +203,9 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 
 		@Override
 		public void visitEnd() {
-			if (internalName.isEmpty()
-					|| (access & Opcodes.ACC_MODULE) != 0
-					|| !isPublicApi(access)
-					|| isCompilerMade(access)) {
+			// ASM always calls visit() first; module descriptors never reach
+			// here because entry selection drops them.
+			if (!isPublicApi(access) || isCompilerMade(access)) {
 				return;
 			}
 			symbols.add(

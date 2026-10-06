@@ -10,6 +10,20 @@
   <packaging>pom</packaging>
   <name>importtruth</name>
   <description>Project-resolved API ground truth for coding agents. Java first.</description>
+  <url>https://github.com/kxng0109/import-truth</url>
+
+  <licenses>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/license/mit</url>
+    </license>
+  </licenses>
+
+  <scm>
+    <connection>scm:git:https://github.com/kxng0109/import-truth.git</connection>
+    <developerConnection>scm:git:https://github.com/kxng0109/import-truth.git</developerConnection>
+    <url>https://github.com/kxng0109/import-truth</url>
+  </scm>
 
   <modules>
     <module>importtruth-model</module>
@@ -79,11 +93,52 @@
         <filtering>true</filtering>
       </testResource>
     </testResources>
+    <plugins>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <excludedGroups>slow</excludedGroups>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+            <configuration>
+              <groups>slow</groups>
+              <includes>
+                <include>**/*Test.java</include>
+              </includes>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
     <pluginManagement>
       <plugins>
         <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>versions-maven-plugin</artifactId>
+          <version>2.22.0</version>
+        </plugin>
+        <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
+          <version>${surefire.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-failsafe-plugin</artifactId>
           <version>${surefire.version}</version>
         </plugin>
         <plugin>
@@ -121,12 +176,12 @@
                 <goal>check</goal>
               </goals>
               <configuration>
+                <excludes>
+                  <exclude>io/github/kxng0109/importtruth/cli/Main.class</exclude>
+                </excludes>
                 <rules>
                   <rule>
                     <element>BUNDLE</element>
-                    <excludes>
-                      <exclude>io.github.kxng0109.importtruth.cli.Main</exclude>
-                    </excludes>
                     <limits>
                       <limit>
                         <counter>LINE</counter>

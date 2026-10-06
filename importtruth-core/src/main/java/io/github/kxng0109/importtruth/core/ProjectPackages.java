@@ -24,9 +24,10 @@ public final class ProjectPackages {
 	 *
 	 * @param projectDir project root, never null
 	 * @return dotted package names, never null
+	 * @throws IOException when directories cannot be walked
 	 * @throws NullPointerException if {@code projectDir} is {@code null}
 	 */
-	public static Set<String> of(Path projectDir) {
+	public static Set<String> of(Path projectDir) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Set<String> packages = new HashSet<>();
 		for (String root : List.of("src/main/java", "src/test/java")) {
@@ -38,7 +39,7 @@ public final class ProjectPackages {
 		return packages;
 	}
 
-	private static void collectSources(Path root, Set<String> packages) {
+	private static void collectSources(Path root, Set<String> packages) throws IOException {
 		if (!Files.isDirectory(root)) {
 			return;
 		}
@@ -47,12 +48,10 @@ public final class ProjectPackages {
 					.map(p -> root.relativize(p.getParent()))
 					.map(ProjectPackages::dotted)
 					.forEach(packages::add);
-		} catch (IOException ignored) {
-			// Best effort: a partial package set only weakens candidate hints.
 		}
 	}
 
-	private static void collectClasses(Path root, Set<String> packages) {
+	private static void collectClasses(Path root, Set<String> packages) throws IOException {
 		if (!Files.isDirectory(root)) {
 			return;
 		}
@@ -61,8 +60,6 @@ public final class ProjectPackages {
 					.map(p -> root.relativize(p.getParent()))
 					.map(ProjectPackages::dotted)
 					.forEach(packages::add);
-		} catch (IOException ignored) {
-			// Best effort: a partial package set only weakens candidate hints.
 		}
 	}
 
