@@ -6,6 +6,7 @@ import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.CheckResult;
 import io.github.kxng0109.importtruth.model.Finding;
 import io.github.kxng0109.importtruth.model.FindingKind;
+import io.github.kxng0109.importtruth.model.ImportVerdict;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
 import io.github.kxng0109.importtruth.model.Symbol;
 
@@ -60,7 +61,7 @@ public final class FileCheckService {
 		Objects.requireNonNull(file, "file");
 		ImportScan scan = JavaImports.of(file);
 		if (!scan.healthy()) {
-			return new CheckResult(false, List.of());
+			return new CheckResult(false, List.of(), List.of());
 		}
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = new ArrayList<>(jars.size());
@@ -70,20 +71,24 @@ public final class FileCheckService {
 		Set<String> own = ProjectPackages.of(projectDir);
 		String display = displayName(projectDir, file);
 		List<Finding> findings = new ArrayList<>();
+		List<ImportVerdict> verdicts = new ArrayList<>();
 		for (ImportRef ref : scan.imports()) {
-			checkImport(dbs, own, display, ref).ifPresent(findings::add);
+			checkImport(dbs, own, display, ref, verdicts).ifPresent(findings::add);
 		}
-		return new CheckResult(true, findings);
+		return new CheckResult(true, findings, verdicts);
 	}
 
-	private Optional<Finding> checkImport(List<Path> dbs, Set<String> own, String display, ImportRef ref)
+	private Optional<Finding> checkImport(
+			List<Path> dbs, Set<String> own, String display, ImportRef ref, List<ImportVerdict> verdicts)
 			throws IOException {
 		if (ref.wildcard()) {
-			return checkWildcard(dbs, own, display, ref);
+			return checkWildcard(dbs, own, display, ref, verdicts);
 		}
 		if (!store.findAcross(dbs, ref.target()).isEmpty() || jdk.exists(ref.target())) {
+			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 			return Optional.empty();
 		}
+		verdicts.add(new ImportVerdict(ref.target(), ref.line(), false));
 		if (isOwnOrGenerated(own, ref.target())) {
 			return Optional.of(candidate(display, ref, "project-owned or generated, unverified"));
 		}
@@ -92,11 +97,14 @@ public final class FileCheckService {
 						"import " + ref.target() + " resolves nowhere", suggestion(dbs, ref.target())));
 	}
 
-	private Optional<Finding> checkWildcard(List<Path> dbs, Set<String> own, String display, ImportRef ref)
+	private Optional<Finding> checkWildcard(
+			List<Path> dbs, Set<String> own, String display, ImportRef ref, List<ImportVerdict> verdicts)
 			throws IOException {
 		if (packageExists(dbs, own, ref.target())) {
+			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 			return Optional.empty();
 		}
+		verdicts.add(new ImportVerdict(ref.target(), ref.line(), false));
 		if (isOwnOrGenerated(own, ref.target())) {
 			return Optional.of(candidate(display, ref, "project-owned or generated, unverified"));
 		}

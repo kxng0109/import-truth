@@ -25,27 +25,38 @@ public final class Main {
 	}
 
 	/**
-	 * Starts the MCP server on standard input and output.
+	 * Starts the MCP server on standard input and output, or checks files.
 	 *
-	 * @param args unused
+	 * @param args empty to serve, or {@code check <projectDir> <file>...}
 	 * @throws Exception when the server thread is interrupted
 	 */
 	public static void main(String[] args) throws Exception {
-		// Standard output is the protocol channel: keep it, then point all
-		// later System.out writes (ours or any library's) at standard error.
-		PrintStream protocolOut = System.out;
-		System.setOut(new PrintStream(System.err, true, StandardCharsets.UTF_8));
 		Path state = Paths.get(System.getProperty("user.home"), ".importtruth");
 		JarIndexStore store = new JarIndexStore(state.resolve("index"));
 		LibraryIndexer indexer = ServiceLoader.load(LibraryIndexer.class).findFirst().orElseThrow(
 				() -> new IllegalStateException("No LibraryIndexer on the classpath"));
 		MavenResolver resolver = new MavenResolver(state);
 		JdkIndex jdk = new JdkIndex();
+		if (args.length >= 3 && "check".equals(args[0])) {
+			CheckCommand command = new CheckCommand(store, indexer, resolver, jdk);
+			Path project = Paths.get(args[1]);
+			int exit = 0;
+			for (int i = 2; i < args.length; i++) {
+				exit = Math.max(exit, command.run(System.out, System.err, project, Paths.get(args[i])));
+			}
+			System.exit(exit);
+			return;
+		}
+		// Standard output is the protocol channel: keep it, then point all
+		// later System.out writes (ours or any library's) at standard error.
+		PrintStream protocolOut = System.out;
+		System.setOut(new PrintStream(System.err, true, StandardCharsets.UTF_8));
 		// Version stamped by the build; never hardcoded.
 		PingService ping = new PingService("importtruth", version());
 		LookupService lookup = new LookupService(store, indexer, resolver, jdk);
 		SearchService search = new SearchService(store, indexer, resolver);
-		ImportTruthServer server = new ImportTruthServer(ping, lookup, search, System.in, protocolOut);
+		ImportTruthServer server = new ImportTruthServer(ping, lookup, search, store, indexer, resolver, jdk,
+				System.in, protocolOut);
 		CountDownLatch stop = new CountDownLatch(1);
 		Runtime.getRuntime().addShutdownHook(new Thread(stop::countDown));
 		try {

@@ -7,9 +7,13 @@ import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.server.transport.StdioServerTransportProvider;
 import io.modelcontextprotocol.spec.McpSchema;
 
+import io.github.kxng0109.importtruth.core.DependencyResolver;
+import io.github.kxng0109.importtruth.core.JdkIndex;
 import io.github.kxng0109.importtruth.core.LookupService;
 import io.github.kxng0109.importtruth.core.PingService;
 import io.github.kxng0109.importtruth.core.SearchService;
+import io.github.kxng0109.importtruth.index.JarIndexStore;
+import io.github.kxng0109.importtruth.model.LibraryIndexer;
 import io.github.kxng0109.importtruth.model.ApiInfo;
 
 import java.io.InputStream;
@@ -48,6 +52,33 @@ public final class ImportTruthServer implements AutoCloseable {
 	 */
 	public ImportTruthServer(
 			PingService ping, LookupService lookup, SearchService search, InputStream in, OutputStream out) {
+		this(ping, lookup, search, null, null, null, null, in, out);
+	}
+
+	/**
+	 * Starts the full server.
+	 *
+	 * @param ping     backing ping service, never null
+	 * @param lookup   backing lookup service, null for ping only
+	 * @param search   backing search service, null for ping only
+	 * @param store    index store, null without file checks
+	 * @param indexer  library extractor, null without file checks
+	 * @param resolver dependency resolver, null without file checks
+	 * @param jdk      JDK index, null without file checks
+	 * @param in       protocol input, never null
+	 * @param out      protocol output, never null
+	 * @throws NullPointerException if {@code ping}, {@code in}, or {@code out} is {@code null}
+	 */
+	public ImportTruthServer(
+			PingService ping,
+			LookupService lookup,
+			SearchService search,
+			JarIndexStore store,
+			LibraryIndexer indexer,
+			DependencyResolver resolver,
+			JdkIndex jdk,
+			InputStream in,
+			OutputStream out) {
 		Objects.requireNonNull(ping, "ping");
 		Objects.requireNonNull(in, "in");
 		Objects.requireNonNull(out, "out");
@@ -77,6 +108,14 @@ public final class ImportTruthServer implements AutoCloseable {
 					McpServerFeatures.SyncToolSpecification.builder()
 							.tool(searchTool.definition())
 							.callHandler((exchange, request) -> searchTool.call(request.arguments()))
+							.build());
+		}
+		if (store != null && indexer != null && resolver != null && jdk != null) {
+			CheckFileTool checkTool = new CheckFileTool(store, indexer, resolver, jdk);
+			server.addTool(
+					McpServerFeatures.SyncToolSpecification.builder()
+							.tool(checkTool.definition())
+							.callHandler((exchange, request) -> checkTool.call(request.arguments()))
 							.build());
 		}
 	}
