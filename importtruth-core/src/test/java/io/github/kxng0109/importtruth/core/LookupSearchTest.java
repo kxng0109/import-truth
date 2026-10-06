@@ -1,6 +1,7 @@
 package io.github.kxng0109.importtruth.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.Confidence;
@@ -11,6 +12,7 @@ import io.github.kxng0109.importtruth.model.SymbolKind;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -73,6 +75,19 @@ final class LookupSearchTest {
 	}
 
 	@Test
+	@DisplayName("suggests across indexes without dots")
+	void suggestsAcrossIndexes() throws Exception {
+		Services services = twoJarServices();
+
+		LookupResult missing = services.lookup().lookup(project, "Widget");
+
+		assertThat(missing.found()).as("missing").isFalse();
+		assertThat(missing.suggestions()).as("five suggestions across jars")
+				.hasSize(5)
+				.contains("com.example.Widget", "com.example.WidgetInfo");
+	}
+
+	@Test
 	@DisplayName("search caps rows")
 	void searchCapsRows() throws Exception {
 		Services services = services();
@@ -83,6 +98,9 @@ final class LookupSearchTest {
 		assertThat(services.search().search(project, "com.nothing.here", 5))
 				.as("empty search")
 				.isEmpty();
+		assertThatThrownBy(() -> services.search().search(project, "com.example", 0))
+				.as("non-positive limit rejected")
+				.isInstanceOf(IllegalArgumentException.class);
 	}
 
 	private Services services() throws IOException {
@@ -95,8 +113,45 @@ final class LookupSearchTest {
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
 				new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
-						"com.example.Widget", true, "2.0", false));
+						"com.example.Widget", true, "2.0", false),
+				new Symbol("com.example.Widget.help", SymbolKind.METHOD, "()V",
+						"com.example.Widget", false, "", false),
+				new Symbol("com.example.Widget.version", SymbolKind.FIELD, "Ljava/lang/String;",
+						"com.example.Widget", false, "", false));
 		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
+		JdkIndex jdk = new JdkIndex();
+		return new Services(
+				new LookupService(store, indexer, resolver, jdk),
+				new SearchService(store, indexer, resolver));
+	}
+
+	private Services twoJarServices() throws IOException {
+		Path first = project.resolve("one.jar");
+		Path second = project.resolve("two.jar");
+		for (Path jar : List.of(first, second)) {
+			try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+				zip.putNextEntry(new ZipEntry("META-INF/"));
+				zip.closeEntry();
+				zip.putNextEntry(new ZipEntry(jar.getFileName().toString() + ".marker"));
+				zip.write(jar.getFileName().toString().getBytes(StandardCharsets.UTF_8));
+				zip.closeEntry();
+			}
+		}
+		JarIndexStore store = new JarIndexStore(state.resolve("split"));
+		LibraryIndexer indexer = jarFile -> {
+			if (jarFile.equals(first)) {
+				return List.of(new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
+			}
+			return List.of(
+					new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
+							"com.example.Widget", true, "2.0", false),
+					new Symbol("com.example.Widget.help", SymbolKind.METHOD, "()V",
+							"com.example.Widget", false, "", false),
+					new Symbol("com.example.Widget.version", SymbolKind.FIELD, "Ljava/lang/String;",
+							"com.example.Widget", false, "", false),
+					new Symbol("com.example.WidgetInfo", SymbolKind.CLASS, null, null, false, "", false));
+		};
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(first, second);
 		JdkIndex jdk = new JdkIndex();
 		return new Services(
 				new LookupService(store, indexer, resolver, jdk),

@@ -14,6 +14,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
@@ -107,6 +108,72 @@ final class FileCheckServiceTest {
 		assertThat(result.findings()).as("no findings when unhealthy").isEmpty();
 	}
 
+	@Test
+	@DisplayName("resolves own and dependency wildcards silently")
+	void resolvesOwnWildcards() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/acme/OwnWild.java",
+				"package com.acme; import com.acme.*; import com.example.Widget.*; import static com.example.Widget.*;"
+						+ " public class OwnWild { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.healthy()).as("healthy file").isTrue();
+		assertThat(result.findings()).as("wildcards resolved").isEmpty();
+	}
+
+	@Test
+	@DisplayName("treats bare own-package names as candidates")
+	void treatsBareOwnNamesAsCandidates() throws Exception {
+		FileCheckService check = service();
+		source("com/acme/Service.java",
+				"package com.acme; import com.acme.Other; public class Service { Other other; }");
+		Path file = source("com/other/SelfRef.java",
+				"package com.other; import com.acme; public class SelfRef { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.healthy()).as("healthy file").isTrue();
+		assertThat(result.findings()).as("one finding").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("candidate kind").isEqualTo(FindingKind.CANDIDATE);
+	}
+
+	@Test
+	@DisplayName("caps suggestions at three names")
+	void capsSuggestions() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/other/Sugg.java",
+				"package com.other;\nimport org.example.Widget;\npublic class Sugg { Widget w; }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.healthy()).as("healthy file").isTrue();
+		assertThat(result.findings()).as("one finding").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("missing kind").isEqualTo(FindingKind.MISSING);
+		assertThat(result.findings().get(0).suggestion()).as("three suggestions")
+				.isEqualTo("maybe: com.example.Widget, com.example.Widget.help, com.example.Widget.build");
+	}
+
+	@Test
+	@DisplayName("falls back to file names outside the project")
+	void fallsBackOutsideProject() throws Exception {
+		FileCheckService check = service();
+		Path outside = Files.createTempFile("Elsewhere", ".java");
+		try {
+			Files.write(outside,
+					"import org.example.Nope; public class Elsewhere { Nope n; }".getBytes(StandardCharsets.UTF_8));
+
+			CheckResult result = check.check(Paths.get("."), outside);
+
+			assertThat(result.healthy()).as("healthy file").isTrue();
+			assertThat(result.findings()).as("one finding").hasSize(1);
+			assertThat(result.findings().get(0).file()).as("file name fallback")
+					.isEqualTo(outside.getFileName().toString());
+		} finally {
+			Files.deleteIfExists(outside);
+		}
+	}
+
 	private FileCheckService service() throws IOException {
 		Path jar = project.resolve("dep.jar");
 		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
@@ -139,6 +206,10 @@ final class FileCheckServiceTest {
 			return List.of(
 					new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
 					new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
+							"com.example.Widget", false, "", false),
+					new Symbol("com.example.Widget.help", SymbolKind.METHOD, "()V",
+							"com.example.Widget", false, "", false),
+					new Symbol("com.example.Widget.version", SymbolKind.FIELD, "Ljava/lang/String;",
 							"com.example.Widget", false, "", false));
 		}
 	}

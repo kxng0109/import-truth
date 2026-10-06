@@ -37,48 +37,6 @@ public final class ImportTruthServer implements AutoCloseable {
 	 * @throws NullPointerException if any argument is {@code null}
 	 */
 	public ImportTruthServer(PingService ping, InputStream in, OutputStream out) {
-		this(ping, null, null, in, out);
-	}
-
-	/**
-	 * Starts the server with lookup and search tools.
-	 *
-	 * @param ping   backing ping service, never null
-	 * @param lookup backing lookup service, null for ping only
-	 * @param search backing search service, null for ping only
-	 * @param in     protocol input, never null
-	 * @param out    protocol output, never null
-	 * @throws NullPointerException if {@code ping}, {@code in}, or {@code out} is {@code null}
-	 */
-	public ImportTruthServer(
-			PingService ping, LookupService lookup, SearchService search, InputStream in, OutputStream out) {
-		this(ping, lookup, search, null, null, null, null, in, out);
-	}
-
-	/**
-	 * Starts the full server.
-	 *
-	 * @param ping     backing ping service, never null
-	 * @param lookup   backing lookup service, null for ping only
-	 * @param search   backing search service, null for ping only
-	 * @param store    index store, null without file checks
-	 * @param indexer  library extractor, null without file checks
-	 * @param resolver dependency resolver, null without file checks
-	 * @param jdk      JDK index, null without file checks
-	 * @param in       protocol input, never null
-	 * @param out      protocol output, never null
-	 * @throws NullPointerException if {@code ping}, {@code in}, or {@code out} is {@code null}
-	 */
-	public ImportTruthServer(
-			PingService ping,
-			LookupService lookup,
-			SearchService search,
-			JarIndexStore store,
-			LibraryIndexer indexer,
-			DependencyResolver resolver,
-			JdkIndex jdk,
-			InputStream in,
-			OutputStream out) {
 		Objects.requireNonNull(ping, "ping");
 		Objects.requireNonNull(in, "in");
 		Objects.requireNonNull(out, "out");
@@ -96,28 +54,73 @@ public final class ImportTruthServer implements AutoCloseable {
 						.tool(pingTool.definition())
 						.callHandler((exchange, request) -> pingTool.call())
 						.build());
-		if (lookup != null && search != null) {
-			LookupTool lookupTool = new LookupTool(lookup);
-			SearchTool searchTool = new SearchTool(search);
-			server.addTool(
-					McpServerFeatures.SyncToolSpecification.builder()
-							.tool(lookupTool.definition())
-							.callHandler((exchange, request) -> lookupTool.call(request.arguments()))
-							.build());
-			server.addTool(
-					McpServerFeatures.SyncToolSpecification.builder()
-							.tool(searchTool.definition())
-							.callHandler((exchange, request) -> searchTool.call(request.arguments()))
-							.build());
-		}
-		if (store != null && indexer != null && resolver != null && jdk != null) {
-			CheckFileTool checkTool = new CheckFileTool(store, indexer, resolver, jdk);
-			server.addTool(
-					McpServerFeatures.SyncToolSpecification.builder()
-							.tool(checkTool.definition())
-							.callHandler((exchange, request) -> checkTool.call(request.arguments()))
-							.build());
-		}
+	}
+
+	/**
+	 * Starts the full server.
+	 *
+	 * @param ping     backing ping service, never null
+	 * @param lookup   backing lookup service, never null
+	 * @param search   backing search service, never null
+	 * @param store    index store, never null
+	 * @param indexer  library extractor, never null
+	 * @param resolver dependency resolver, never null
+	 * @param jdk      JDK index, never null
+	 * @param in       protocol input, never null
+	 * @param out      protocol output, never null
+	 * @throws NullPointerException if any argument is {@code null}
+	 */
+	public ImportTruthServer(
+			PingService ping,
+			LookupService lookup,
+			SearchService search,
+			JarIndexStore store,
+			LibraryIndexer indexer,
+			DependencyResolver resolver,
+			JdkIndex jdk,
+			InputStream in,
+			OutputStream out) {
+		Objects.requireNonNull(ping, "ping");
+		Objects.requireNonNull(lookup, "lookup");
+		Objects.requireNonNull(search, "search");
+		Objects.requireNonNull(store, "store");
+		Objects.requireNonNull(indexer, "indexer");
+		Objects.requireNonNull(resolver, "resolver");
+		Objects.requireNonNull(jdk, "jdk");
+		Objects.requireNonNull(in, "in");
+		Objects.requireNonNull(out, "out");
+		PingTool pingTool = new PingTool(ping);
+		ApiInfo info = ping.ping();
+		StdioServerTransportProvider provider =
+				new StdioServerTransportProvider(McpJsonDefaults.getMapper(), in, out);
+		this.server =
+				McpServer.sync(provider)
+						.serverInfo(info.name(), info.version())
+						.capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
+						.build();
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(pingTool.definition())
+						.callHandler((exchange, request) -> pingTool.call())
+						.build());
+		LookupTool lookupTool = new LookupTool(lookup);
+		SearchTool searchTool = new SearchTool(search);
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(lookupTool.definition())
+						.callHandler((exchange, request) -> lookupTool.call(request.arguments()))
+						.build());
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(searchTool.definition())
+						.callHandler((exchange, request) -> searchTool.call(request.arguments()))
+						.build());
+		CheckFileTool checkTool = new CheckFileTool(store, indexer, resolver, jdk);
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(checkTool.definition())
+						.callHandler((exchange, request) -> checkTool.call(request.arguments()))
+						.build());
 	}
 
 	@Override

@@ -1,6 +1,7 @@
 package io.github.kxng0109.importtruth.index;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
 import io.github.kxng0109.importtruth.model.Symbol;
@@ -104,6 +105,93 @@ final class JarIndexStoreTest {
 		Path jar = jars.resolve(name);
 		Files.write(jar, name.getBytes(StandardCharsets.UTF_8));
 		return jar;
+	}
+
+	@Test
+	@DisplayName("reuses existing indexes and rejects bad limits")
+	void reusesAndValidates() throws Exception {
+		JarIndexStore store = new JarIndexStore(state);
+		FakeIndexer indexer = new FakeIndexer();
+		Path jar = fakeJar("again.jar");
+
+		Path first = store.ensureIndexed(jar, indexer);
+		Path second = store.ensureIndexed(jar, indexer);
+
+		assertThat(second).as("same index reused").isEqualTo(first);
+		assertThat(indexer.runs.get()).as("indexed once").isEqualTo(1);
+		assertThatThrownBy(() -> store.searchIn(first, "x", 0))
+				.as("non-positive limit rejected")
+				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	@DisplayName("propagates extractor failures")
+	void propagatesFailures() throws Exception {
+		JarIndexStore store = new JarIndexStore(state);
+		Path jar = fakeJar("broken.jar");
+
+		assertThatThrownBy(() -> store.ensureIndexed(jar, jarFile -> {
+			throw new IOException("unreadable");
+		})).as("io failure surfaces").isInstanceOf(IOException.class).hasMessageContaining("unreadable");
+		assertThatThrownBy(() -> store.ensureIndexed(jar, jarFile -> {
+			throw new IllegalStateException("broken");
+		})).as("runtime failure wrapped").isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("wraps unreadable databases")
+	void wrapsUnreadable() throws Exception {
+		JarIndexStore store = new JarIndexStore(state);
+		Path dir = state.resolve("notadb");
+		Files.createDirectories(dir);
+
+		assertThatThrownBy(() -> store.findIn(dir, "a.B")).as("unreadable find").isInstanceOf(IOException.class);
+		assertThatThrownBy(() -> store.searchIn(dir, "a", 5)).as("unreadable search").isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("rolls back oversized rows")
+	void rollsBackOversized() throws Exception {
+		JarIndexStore store = new JarIndexStore(state);
+		Path jar = fakeJar("wide.jar");
+		String wide = "com.example." + "W".repeat(2000);
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol(wide, SymbolKind.CLASS, null, null, false, "", false));
+
+		assertThatThrownBy(() -> store.ensureIndexed(jar, indexer))
+				.as("oversized row fails")
+				.isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("publishes temp files and tolerates races")
+	void publishesTempFiles() throws Exception {
+		Path target = state.resolve("final.mv.db");
+		Path tmp = state.resolve("staged.tmp.mv.db");
+		Files.write(tmp, "data".getBytes(StandardCharsets.UTF_8));
+
+		JarIndexStore.publishTmp(tmp, target);
+		assertThat(target).as("published file").exists();
+		assertThat(tmp).as("temp consumed").doesNotExist();
+
+		Path missing = state.resolve("ghost.tmp.mv.db");
+		assertThatThrownBy(() -> JarIndexStore.publishTmp(missing, state.resolve("ghost.mv.db")))
+				.as("missing temp throws")
+				.isInstanceOf(IOException.class);
+
+		Path staged = state.resolve("race.tmp.mv.db");
+		Files.write(staged, "new".getBytes(StandardCharsets.UTF_8));
+		JarIndexStore.publishTmp(staged, target);
+		assertThat(target).as("loser tolerated").exists();
+	}
+
+	@Test
+	@DisplayName("rejects null hashes")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullHashes() {
+		assertThatThrownBy(() -> Sha256.ofFile(null))
+				.as("null file rejection")
+				.isInstanceOf(NullPointerException.class);
 	}
 
 	/** Deterministic canned symbols, no bytecode involved. */

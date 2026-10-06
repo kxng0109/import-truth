@@ -156,9 +156,6 @@ public final class JarIndexStore {
 	}
 
 	private void write(String sha, String artifact, List<Symbol> symbols) throws IOException {
-		if (Files.exists(dbFile(sha))) {
-			return;
-		}
 		String tmpBase = baseDir.resolve(sha + ".tmp").toAbsolutePath().toString();
 		String url = "jdbc:h2:file:" + tmpBase + ";LOCK_TIMEOUT=5000";
 		try (Connection connection = DriverManager.getConnection(url)) {
@@ -200,11 +197,25 @@ public final class JarIndexStore {
 			throw new IOException("Index write failed for " + sha, failure);
 		}
 		Path tmpFile = baseDir.resolve(sha + ".tmp.mv.db");
+		publishTmp(tmpFile, dbFile(sha));
+	}
+
+	/**
+	 * Atomically publishes a finished temp file, tolerating a concurrent
+	 * writer that already published the same content.
+	 *
+	 * @param tmpFile finished temp file, never null
+	 * @param target  final location, never null
+	 * @throws IOException when publishing fails and no file exists
+	 */
+	static void publishTmp(Path tmpFile, Path target) throws IOException {
+		Objects.requireNonNull(tmpFile, "tmpFile");
+		Objects.requireNonNull(target, "target");
 		try {
-			Files.move(tmpFile, dbFile(sha), StandardCopyOption.ATOMIC_MOVE);
+			Files.move(tmpFile, target, StandardCopyOption.ATOMIC_MOVE);
 		} catch (IOException atomic) {
 			Files.deleteIfExists(tmpFile);
-			if (Files.exists(dbFile(sha))) {
+			if (Files.exists(target)) {
 				return;
 			}
 			throw atomic;

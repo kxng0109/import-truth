@@ -68,6 +68,10 @@ code either; it only reads the shape of it.
 
 On Windows use `mvnw.cmd` in place of `./mvnw`.
 
+Every module enforces coverage gates on `verify`: 95% line, 90% branch
+(the `Main` wiring class is excluded; everything else is tested). The
+gates have already caught real bugs, so they stay.
+
 ## Enforcement
 
 After edits, an opencode plugin runs the check and reports findings back
@@ -91,5 +95,6 @@ under `mcp.servers` for model-driven checks.
 ## Status
 
 M2 done: file check, policy packs, hook plugin, pre-commit sample
-(43 tests green, zero warnings; hook proven live against subagent edits).
-Next is M3: daemon and concurrency hardening.
+(102 tests green, zero warnings; hook proven live against subagent edits).
+Coverage gates green on all 7 modules. Next is M3: daemon and
+concurrency hardening.

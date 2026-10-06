@@ -77,16 +77,14 @@ public final class CheckCommand {
 			return 0;
 		}
 		List<Finding> findings = new ArrayList<>(result.findings());
-		if (policy != null) {
-			for (ImportVerdict verdict : result.verdicts()) {
-				if (!verdict.resolved()) {
-					continue;
-				}
-				Optional<PolicyHit> hit = policy.evaluate(verdict.target(), true);
-				if (hit.isPresent()) {
-					findings.add(new Finding(display(projectDir, file), (int) verdict.line(),
-							FindingKind.POLICY, hit.get().detail(), hit.get().suggestion()));
-				}
+		for (ImportVerdict verdict : result.verdicts()) {
+			if (!verdict.resolved()) {
+				continue;
+			}
+			Optional<PolicyHit> hit = policy.evaluate(verdict.target(), true);
+			if (hit.isPresent()) {
+				findings.add(new Finding(display(projectDir, file), (int) verdict.line(),
+						FindingKind.POLICY, hit.get().detail(), hit.get().suggestion()));
 			}
 		}
 		for (Finding finding : findings) {

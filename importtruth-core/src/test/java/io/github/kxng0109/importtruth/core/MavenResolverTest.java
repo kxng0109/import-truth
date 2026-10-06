@@ -1,14 +1,24 @@
 package io.github.kxng0109.importtruth.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -37,5 +47,90 @@ final class MavenResolverTest {
 				.as("contains the assertion library")
 				.isTrue();
 		assertThat(second).as("cached second run").isEqualTo(first);
+	}
+
+	@Test
+	@DisplayName("picks launchers per operating system")
+	void picksLaunchers() throws Exception {
+		Path dir = Files.createTempDirectory("launcher");
+		try {
+			Path script = dir.resolve("mvnw.cmd");
+			Files.write(script, "x".getBytes(StandardCharsets.UTF_8));
+
+			assertThat(MavenResolver.launcher(null, true)).as("windows fallback").containsExactly("mvn.cmd");
+			assertThat(MavenResolver.launcher(null, false)).as("unix fallback").containsExactly("mvn");
+			assertThat(MavenResolver.launcher(script, true).get(0)).as("windows shell").isEqualTo("cmd");
+			assertThat(MavenResolver.launcher(script, false).get(0)).as("unix shell").isEqualTo("sh");
+			assertThat(MavenResolver.findWrapper(dir, true)).as("windows wrapper").isEqualTo(script);
+			assertThat(MavenResolver.findWrapper(dir.resolve("deep").resolve("nested"), false))
+					.as("missing wrapper")
+					.isNull();
+		} finally {
+			Files.deleteIfExists(dir.resolve("mvnw.cmd"));
+			Files.deleteIfExists(dir);
+		}
+	}
+
+	@Test
+	@DisplayName("fails loudly on unresolvable projects")
+	void failsLoudly() throws Exception {
+		Path bare = Files.createTempDirectory("bare");
+		Files.write(bare.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>bare</artifactId><version>1</version>"
+						+ "<dependencies><dependency><groupId>com.example</groupId>"
+						+ "<artifactId>does-not-exist</artifactId><version>1</version>"
+						+ "</dependency></dependencies></project>").getBytes(StandardCharsets.UTF_8));
+		MavenResolver resolver = new MavenResolver(state);
+
+		assertThatThrownBy(() -> resolver.resolve(bare, true))
+				.as("unresolvable fails")
+				.isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("returns empty for dependency-free projects")
+	void returnsEmptyForBareProjects() throws Exception {
+		Path bare = Paths.get("target", "test-fixtures", "empty-deps");
+		Files.createDirectories(bare);
+		Files.write(bare.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>bare</artifactId><version>1</version></project>")
+						.getBytes(StandardCharsets.UTF_8));
+		MavenResolver resolver = new MavenResolver(state);
+
+		assertThat(resolver.resolve(bare, false)).as("empty union").isEmpty();
+	}
+
+	@Test
+	@DisplayName("stops on interruption")
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void stopsOnInterruption() throws Exception {
+		Path projectDir = Paths.get(System.getProperty("user.dir")).getParent();
+		MavenResolver resolver = new MavenResolver(state);
+		CountDownLatch started = new CountDownLatch(1);
+		AtomicBoolean interrupted = new AtomicBoolean(false);
+		try (var pool = Executors.newSingleThreadExecutor()) {
+			Future<?> run = pool.submit(() -> {
+				started.countDown();
+				try {
+					resolver.resolve(projectDir, false);
+				} catch (IOException expected) {
+					interrupted.set(true);
+				}
+				return null;
+			});
+			assertThat(started.await(10, TimeUnit.SECONDS)).as("run started").isTrue();
+			Thread.sleep(500);
+			run.cancel(true);
+			assertThatThrownBy(() -> run.get(30, TimeUnit.SECONDS))
+					.as("cancelled run")
+					.isInstanceOf(CancellationException.class);
+			long deadline = System.currentTimeMillis() + 10_000;
+			while (!interrupted.get() && System.currentTimeMillis() < deadline) {
+				Thread.sleep(100);
+			}
+			assertThat(interrupted.get()).as("worker saw the interrupt").isTrue();
+		}
 	}
 }

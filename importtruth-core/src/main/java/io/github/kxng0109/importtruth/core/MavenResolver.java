@@ -164,6 +164,7 @@ public final class MavenResolver implements DependencyResolver {
 			finished = process.waitFor(120, TimeUnit.SECONDS);
 		} catch (InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
+			process.destroyForcibly();
 			throw new IOException("Interrupted resolving " + module, interrupted);
 		}
 		if (!finished) {
@@ -179,8 +180,11 @@ public final class MavenResolver implements DependencyResolver {
 	}
 
 	private static Path findWrapper(Path module) {
+		return findWrapper(module, isWindows());
+	}
+
+	static Path findWrapper(Path module, boolean windows) {
 		Path current = module.toAbsolutePath();
-		boolean windows = System.getProperty("os.name", "").startsWith("Windows");
 		while (current != null) {
 			Path wrapper = current.resolve(windows ? "mvnw.cmd" : "mvnw");
 			if (Files.exists(wrapper)) {
@@ -192,17 +196,21 @@ public final class MavenResolver implements DependencyResolver {
 	}
 
 	private static List<String> launcher(Path wrapper) {
-		boolean windows = System.getProperty("os.name", "").startsWith("Windows");
+		return launcher(wrapper, isWindows());
+	}
+
+	static List<String> launcher(Path wrapper, boolean windows) {
 		if (wrapper == null) {
 			return List.of(windows ? "mvn.cmd" : "mvn");
 		}
 		if (windows) {
 			return List.of("cmd", "/d", "/c", wrapper.toAbsolutePath().toString());
 		}
-		if (Files.isExecutable(wrapper)) {
-			return List.of(wrapper.toAbsolutePath().toString());
-		}
 		return List.of("sh", wrapper.toAbsolutePath().toString());
+	}
+
+	private static boolean isWindows() {
+		return System.getProperty("os.name", "").startsWith("Windows");
 	}
 
 	private static String joinClasspath(List<Path> jars) {
