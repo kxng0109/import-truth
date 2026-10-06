@@ -3,7 +3,9 @@ package io.github.kxng0109.importtruth.core;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -107,6 +109,29 @@ final class MavenResolverTest {
 	}
 
 	@Test
+	@DisplayName("drains streams, caps tails, and survives torn streams")
+	void drainsStreams() {
+		StringBuilder shortLog = new StringBuilder();
+		MavenResolver.drainTo(
+				new ByteArrayInputStream("alpha\nbeta\n".getBytes(StandardCharsets.UTF_8)), shortLog);
+
+		assertThat(shortLog.toString()).as("lines kept").isEqualTo("alpha\nbeta\n");
+
+		StringBuilder capped = new StringBuilder();
+		MavenResolver.drainTo(
+				new ByteArrayInputStream("y\n".repeat(1500).getBytes(StandardCharsets.UTF_8)), capped);
+
+		assertThat(capped.length()).as("tail capped near two thousand")
+				.isGreaterThanOrEqualTo(2000)
+				.isLessThan(3000);
+
+		StringBuilder broken = new StringBuilder();
+		MavenResolver.drainTo(new FailingStream(), broken);
+
+		assertThat(broken).as("torn stream tolerated").isEmpty();
+	}
+
+	@Test
 	@Tag("slow")
 	@DisplayName("stops on interruption")
 	@Timeout(value = 60, unit = TimeUnit.SECONDS)
@@ -136,6 +161,15 @@ final class MavenResolverTest {
 				Thread.sleep(100);
 			}
 			assertThat(interrupted.get()).as("worker saw the interrupt").isTrue();
+		}
+	}
+
+	/** Stream that fails on every read. */
+	private static final class FailingStream extends InputStream {
+
+		@Override
+		public int read() throws IOException {
+			throw new IOException("torn down");
 		}
 	}
 }
