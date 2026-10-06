@@ -1,0 +1,108 @@
+package io.github.kxng0109.importtruth.core;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import io.github.kxng0109.importtruth.index.JarIndexStore;
+import io.github.kxng0109.importtruth.model.Confidence;
+import io.github.kxng0109.importtruth.model.LibraryIndexer;
+import io.github.kxng0109.importtruth.model.LookupResult;
+import io.github.kxng0109.importtruth.model.Symbol;
+import io.github.kxng0109.importtruth.model.SymbolKind;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.jar.JarOutputStream;
+import java.util.zip.ZipEntry;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+/**
+ * Verifies lookup and search directly: dependency hits, JDK hits, misses
+ * with suggestions, and search caps.
+ */
+@DisplayName("Lookup and search services")
+final class LookupSearchTest {
+
+	@TempDir
+	private Path state;
+
+	@TempDir
+	private Path project;
+
+	@Test
+	@DisplayName("finds dependency symbols with details")
+	void findsDependencySymbols() throws Exception {
+		Services services = services();
+		Path projectDir = project;
+
+		LookupResult found = services.lookup().lookup(projectDir, "com.example.Widget");
+
+		assertThat(found.found()).as("found").isTrue();
+		assertThat(found.confidence()).as("confidence").isEqualTo(Confidence.DEFINITE);
+		assertThat(found.matches()).as("match details").hasSize(1);
+		assertThat(found.matches().get(0).deprecated()).as("match deprecation").isFalse();
+		assertThat(found.fromJdk()).as("not JDK").isFalse();
+	}
+
+	@Test
+	@DisplayName("flags JDK hits")
+	void flagsJdkHits() throws Exception {
+		Services services = services();
+
+		LookupResult jdk = services.lookup().lookup(project, "java.util.ArrayList");
+
+		assertThat(jdk.found()).as("JDK found").isTrue();
+		assertThat(jdk.fromJdk()).as("JDK flagged").isTrue();
+	}
+
+	@Test
+	@DisplayName("misses with suggestions")
+	void missesWithSuggestions() throws Exception {
+		Services services = services();
+
+		LookupResult missing = services.lookup().lookup(project, "org.example.Widget");
+
+		assertThat(missing.found()).as("missing").isFalse();
+		assertThat(missing.confidence()).as("candidate").isEqualTo(Confidence.CANDIDATE);
+		assertThat(missing.suggestions()).as("suggestions name the neighbor").contains("com.example.Widget");
+	}
+
+	@Test
+	@DisplayName("search caps rows")
+	void searchCapsRows() throws Exception {
+		Services services = services();
+
+		assertThat(services.search().search(project, "com.example", 1))
+				.as("capped search")
+				.hasSize(1);
+		assertThat(services.search().search(project, "com.nothing.here", 5))
+				.as("empty search")
+				.isEmpty();
+	}
+
+	private Services services() throws IOException {
+		Path jar = project.resolve("dep.jar");
+		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new ZipEntry("META-INF/"));
+			zip.closeEntry();
+		}
+		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
+				new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
+						"com.example.Widget", true, "2.0", false));
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
+		JdkIndex jdk = new JdkIndex();
+		return new Services(
+				new LookupService(store, indexer, resolver, jdk),
+				new SearchService(store, indexer, resolver));
+	}
+
+	private record Services(LookupService lookup, SearchService search) {
+	}
+}

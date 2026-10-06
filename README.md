@@ -1,18 +1,22 @@
 # importtruth
 
-Project-resolved API ground truth for coding agents. Java first.
+Your coding agent keeps importing classes that do not exist. importtruth is
+the friend who has actually read the libraries and says so, politely but
+firmly, before the build has to.
 
-Reads a project's real dependency JARs, indexes their public API, and answers
-lookups so agents stop importing classes that do not exist.
+It reads your project's real dependency JARs, writes down every public class
+they offer, and answers one question over and over: does this name exist?
+Java first.
 
 ## How it works (big picture)
 
 1. **Resolve.** Ask Maven which exact library (JAR) files your project uses.
-   Remember the answer; ask again only when your build files change.
+   Remember the answer; ask again only when your build files change. No
+   guessing, no "probably this version".
 2. **Index.** Open each library once and write down every public class it
-   offers, like an index at the back of a book. Each library is stored under
+   offers, like an index at the back of a book. Each library is filed under
    the fingerprint (SHA-256) of its contents, so the same file is never
-   indexed twice.
+   indexed twice and a stale snapshot cannot sneak in.
 3. **Answer.** When the agent writes code, check each import against the
    index. A real import passes silently. A fake import gets one short
    correction line naming the right class.
@@ -34,6 +38,7 @@ code either; it only reads the shape of it.
   and stale snapshots stop being a problem.
 - **Single-flight.** If five checks ask for the same library at once, only
   one of them does the indexing work and the other four wait for the result.
+  Teamwork, enforced by a hash map.
 - **MCP server.** The way the tool talks to the agent: short questions and
   answers over a standard channel (standard input and output). Logs always go
   to the error channel so they never corrupt the conversation.
@@ -46,7 +51,7 @@ code either; it only reads the shape of it.
   or old `javax` names to new `jakarta` names. Rules only fire after the
   existence check passes, so a missing class is never misreported as a style
   problem. Each rule proves its replacement target really exists in your
-  actual libraries, or it disables itself.
+  actual libraries, or it disables itself rather than bluff.
 
 ## Boxes (modules)
 
