@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -31,6 +32,7 @@ final class MavenResolverTest {
 	private Path state;
 
 	@Test
+	@Tag("slow")
 	@DisplayName("resolves the repository jars and reuses the cache")
 	void resolvesOwnJarsTwice() throws Exception {
 		Path projectDir = Paths.get(System.getProperty("user.dir")).getParent();
@@ -72,6 +74,7 @@ final class MavenResolverTest {
 	}
 
 	@Test
+	@Tag("slow")
 	@DisplayName("fails loudly on unresolvable projects")
 	void failsLoudly() throws Exception {
 		Path bare = Files.createTempDirectory("bare");
@@ -89,6 +92,7 @@ final class MavenResolverTest {
 	}
 
 	@Test
+	@Tag("slow")
 	@DisplayName("returns empty for dependency-free projects")
 	void returnsEmptyForBareProjects() throws Exception {
 		Path bare = Paths.get("target", "test-fixtures", "empty-deps");
@@ -103,6 +107,7 @@ final class MavenResolverTest {
 	}
 
 	@Test
+	@Tag("slow")
 	@DisplayName("stops on interruption")
 	@Timeout(value = 60, unit = TimeUnit.SECONDS)
 	void stopsOnInterruption() throws Exception {

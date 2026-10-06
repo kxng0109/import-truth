@@ -68,6 +68,10 @@ code either; it only reads the shape of it.
 
 On Windows use `mvnw.cmd` in place of `./mvnw`.
 
+Slow tests (real Maven spawns, heavy fixtures) carry `@Tag("slow")`:
+`mvn test` runs the fast loop only, `mvn verify` runs everything
+including coverage gates.
+
 Every module enforces coverage gates on `verify`: 95% line, 90% branch
 (the `Main` wiring class is excluded; everything else is tested). The
 gates have already caught real bugs, so they stay.

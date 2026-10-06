@@ -20,7 +20,9 @@ import java.util.stream.Stream;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
 
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -41,15 +43,50 @@ final class MultiReleaseAndKindsTest {
 	@TempDir
 	private Path work;
 
+	@TempDir
+	private static Path shared;
+
+	private static Path baseClasses;
+	private static Path nineClasses;
+	private static Path tenClasses;
+	private static Path kindsClasses;
+
+	/** Compiles every fixture once; classes are read-only and shared. */
+	@BeforeAll
+	static void compileFixtures() throws Exception {
+		baseClasses = compileIn(shared, Map.of("com.mr.Feature",
+				"package com.mr; public class Feature { public void base() {} }"));
+		nineClasses = compileIn(shared, Map.of("com.mr.Feature",
+				"package com.mr; public class Feature { public void nine() {} }"));
+		tenClasses = compileIn(shared, Map.of("com.mr.Feature",
+				"package com.mr; public class Feature { public void ten() {} }"));
+		kindsClasses = compileIn(shared, Map.of(
+				"com.example.Anno", "package com.example; public @interface Anno {}",
+				"com.example.State", "package com.example; public enum State { ON, OFF }",
+				"com.example.Point", "package com.example; public record Point(int x) {}",
+				"com.example.Marked",
+				"package com.example; public class Marked {"
+						+ " @Deprecated public void old() {}"
+						+ " @Deprecated public String legacy = \"x\";"
+						+ " @SuppressWarnings(\"all\") public void plain() {}"
+						+ " @Valued(n = 4, flag = true) public int count = 0; }",
+				"com.example.Hidden", "package com.example; class Hidden { public void show() {} }",
+				"com.example.Valued", "package com.example; public @interface Valued { int n(); boolean flag(); }",
+				"com.example.Odd",
+				"package com.example; public @interface Odd { int since(); String forRemoval(); }",
+				"com.example.Rated",
+				"package com.example; public class Rated { @Valued(n = 1, flag = true) public void run() {}"
+						+ " @Odd(since = 2, forRemoval = \"x\") public void odd() {}"
+						+ " @Valued(n = 3, flag = false) public int score = 0; }"));
+	}
+
 	@Test
+	@Tag("slow")
 	@DisplayName("prefers the newest compatible versioned entry")
 	void prefersVersionedEntries() throws Exception {
-		Path base = compile(Map.of("com.mr.Feature",
-				"package com.mr; public class Feature { public void base() {} }"));
-		Path nine = compile(Map.of("com.mr.Feature",
-				"package com.mr; public class Feature { public void nine() {} }"));
-		Path ten = compile(Map.of("com.mr.Feature",
-				"package com.mr; public class Feature { public void ten() {} }"));
+		Path base = baseClasses;
+		Path nine = nineClasses;
+		Path ten = tenClasses;
 		Path jar = work.resolve("mr.jar");
 		try (OutputStream out = Files.newOutputStream(jar);
 				JarOutputStream zip = new JarOutputStream(out)) {
@@ -86,26 +123,10 @@ final class MultiReleaseAndKindsTest {
 	}
 
 	@Test
+	@Tag("slow")
 	@DisplayName("records annotation, enum, and record kinds with member deprecation")
 	void recordsKinds() throws Exception {
-		Path jar = jarOf(Map.of(
-				"com.example.Anno", "package com.example; public @interface Anno {}",
-				"com.example.State", "package com.example; public enum State { ON, OFF }",
-				"com.example.Point", "package com.example; public record Point(int x) {}",
-				"com.example.Marked",
-				"package com.example; public class Marked {"
-						+ " @Deprecated public void old() {}"
-						+ " @Deprecated public String legacy = \"x\";"
-						+ " @SuppressWarnings(\"all\") public void plain() {}"
-						+ " @Valued(n = 4, flag = true) public int count = 0; }",
-				"com.example.Hidden", "package com.example; class Hidden { public void show() {} }",
-				"com.example.Valued", "package com.example; public @interface Valued { int n(); boolean flag(); }",
-				"com.example.Odd",
-				"package com.example; public @interface Odd { int since(); String forRemoval(); }",
-				"com.example.Rated",
-				"package com.example; public class Rated { @Valued(n = 1, flag = true) public void run() {}"
-						+ " @Odd(since = 2, forRemoval = \"x\") public void odd() {}"
-						+ " @Valued(n = 3, flag = false) public int score = 0; }"));
+		Path jar = jarFrom(kindsClasses);
 
 		List<Symbol> symbols = new AsmLibraryIndexer().index(jar);
 
@@ -136,6 +157,7 @@ final class MultiReleaseAndKindsTest {
 	}
 
 	@Test
+	@Tag("slow")
 	@DisplayName("refuses archives with too many entries")
 	@Timeout(value = 60, unit = TimeUnit.SECONDS)
 	void refusesHugeArchives() throws Exception {
@@ -209,8 +231,8 @@ final class MultiReleaseAndKindsTest {
 				.kind();
 	}
 
-	private Path compile(Map<String, String> sources) throws Exception {
-		Path classes = Files.createTempDirectory(work, "classes");
+	private static Path compileIn(Path root, Map<String, String> sources) throws Exception {
+		Path classes = Files.createTempDirectory(root, "classes");
 		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
 		assertThat(compiler).as("system compiler present").isNotNull();
 		List<String> files = new ArrayList<>();
@@ -228,8 +250,7 @@ final class MultiReleaseAndKindsTest {
 		return classes;
 	}
 
-	private Path jarOf(Map<String, String> sources) throws Exception {
-		Path classes = compile(sources);
+	private Path jarFrom(Path classes) throws Exception {
 		Path jar = Files.createTempFile(work, "fixture", ".jar");
 		try (OutputStream out = Files.newOutputStream(jar);
 				JarOutputStream zip = new JarOutputStream(out);

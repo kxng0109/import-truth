@@ -150,18 +150,35 @@ public final class MavenResolver implements DependencyResolver {
 		} catch (IOException failed) {
 			return new ResolveOutcome(false, "cannot start " + command.get(0) + ": " + failed.getMessage());
 		}
-		try (BufferedReader reader = new BufferedReader(
-				new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-			String line;
-			while ((line = reader.readLine()) != null) {
-				if (log.length() < 2000) {
-					log.append(line).append('\n');
+		// Drain on a daemon thread: the blocking stream read must never
+		// trap the worker before the interruptible wait below.
+		Thread drain = new Thread(() -> {
+			try (BufferedReader reader = new BufferedReader(
+					new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+				String line;
+				while ((line = reader.readLine()) != null) {
+					if (log.length() < 2000) {
+						synchronized (log) {
+							log.append(line).append('\n');
+						}
+					}
 				}
+			} catch (IOException ignored) {
+				// Stream torn down with the process; the tail is best effort.
 			}
-		}
+		});
+		drain.setDaemon(true);
+		drain.start();
 		boolean finished;
 		try {
 			finished = process.waitFor(120, TimeUnit.SECONDS);
+		} catch (InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+			process.destroyForcibly();
+			throw new IOException("Interrupted resolving " + module, interrupted);
+		}
+		try {
+			drain.join(10_000);
 		} catch (InterruptedException interrupted) {
 			Thread.currentThread().interrupt();
 			process.destroyForcibly();

@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.ServiceLoader;
 
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
@@ -47,6 +48,7 @@ final class CheckCommandTest {
 	private Path files;
 
 	@Test
+	@Tag("slow")
 	@DisplayName("silent clean, loud missing, policy rename")
 	@Timeout(value = 120, unit = TimeUnit.SECONDS)
 	void goldenChecks() throws Exception {
