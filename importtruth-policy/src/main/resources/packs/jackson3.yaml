@@ -1,0 +1,10 @@
+name: jackson3
+prefer:
+  - package: tools.jackson.databind
+    over: com.fasterxml.jackson.databind
+    message: "Jackson 3 project: use tools.jackson.databind."
+allow:
+  - com.fasterxml.jackson.annotation
+renames:
+  - from: com.fasterxml.jackson.databind.ObjectMapper
+    to: tools.jackson.databind.ObjectMapper
