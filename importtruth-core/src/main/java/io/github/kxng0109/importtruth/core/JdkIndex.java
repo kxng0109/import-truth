@@ -64,4 +64,22 @@ public final class JdkIndex {
 			return false;
 		}
 	}
+
+	/**
+	 * Checks whether a package exists in the runtime image.
+	 *
+	 * @param name dotted package name, never null
+	 * @return true when some module holds the package directory
+	 * @throws NullPointerException when {@code name} is {@code null}
+	 */
+	public boolean packageExists(String name) {
+		Objects.requireNonNull(name, "name");
+		String path = name.replace('.', '/');
+		FileSystem image = FileSystems.getFileSystem(URI.create("jrt:/"));
+		try (var entries = Files.list(image.getPath("/modules"))) {
+			return entries.anyMatch(module -> Files.isDirectory(module.resolve(path)));
+		} catch (Exception missing) {
+			return false;
+		}
+	}
 }

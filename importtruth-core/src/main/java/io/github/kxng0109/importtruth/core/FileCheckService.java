@@ -1,0 +1,160 @@
+package io.github.kxng0109.importtruth.core;
+
+import io.github.kxng0109.importtruth.core.JavaImports.ImportRef;
+import io.github.kxng0109.importtruth.core.JavaImports.ImportScan;
+import io.github.kxng0109.importtruth.index.JarIndexStore;
+import io.github.kxng0109.importtruth.model.CheckResult;
+import io.github.kxng0109.importtruth.model.Finding;
+import io.github.kxng0109.importtruth.model.FindingKind;
+import io.github.kxng0109.importtruth.model.LibraryIndexer;
+import io.github.kxng0109.importtruth.model.Symbol;
+
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+
+/**
+ * Checks one source file's imports against the resolved classpath, the JDK,
+ * and the project's own packages. Existence first: a name that resolves
+ * nowhere project-owned is a miss; anything else is at most a candidate.
+ * Silent on success: clean files yield no findings.
+ */
+public final class FileCheckService {
+
+	private final JarIndexStore store;
+	private final LibraryIndexer indexer;
+	private final DependencyResolver resolver;
+	private final JdkIndex jdk;
+
+	/**
+	 * Creates the service.
+	 *
+	 * @param store    index store, never null
+	 * @param indexer  library extractor, never null
+	 * @param resolver dependency resolver, never null
+	 * @param jdk      JDK index, never null
+	 * @throws NullPointerException when any argument is {@code null}
+	 */
+	public FileCheckService(JarIndexStore store, LibraryIndexer indexer, DependencyResolver resolver, JdkIndex jdk) {
+		this.store = Objects.requireNonNull(store, "store");
+		this.indexer = Objects.requireNonNull(indexer, "indexer");
+		this.resolver = Objects.requireNonNull(resolver, "resolver");
+		this.jdk = Objects.requireNonNull(jdk, "jdk");
+	}
+
+	/**
+	 * Checks the file.
+	 *
+	 * @param projectDir project root, never null
+	 * @param file       source file, never null
+	 * @return the outcome, never null
+	 * @throws IOException when resolution or indexing fails
+	 */
+	public CheckResult check(Path projectDir, Path file) throws IOException {
+		Objects.requireNonNull(projectDir, "projectDir");
+		Objects.requireNonNull(file, "file");
+		ImportScan scan = JavaImports.of(file);
+		if (!scan.healthy()) {
+			return new CheckResult(false, List.of());
+		}
+		List<Path> jars = resolver.resolve(projectDir, false);
+		List<Path> dbs = new ArrayList<>(jars.size());
+		for (Path jar : jars) {
+			dbs.add(store.ensureIndexed(jar, indexer));
+		}
+		Set<String> own = ProjectPackages.of(projectDir);
+		String display = displayName(projectDir, file);
+		List<Finding> findings = new ArrayList<>();
+		for (ImportRef ref : scan.imports()) {
+			checkImport(dbs, own, display, ref).ifPresent(findings::add);
+		}
+		return new CheckResult(true, findings);
+	}
+
+	private Optional<Finding> checkImport(List<Path> dbs, Set<String> own, String display, ImportRef ref)
+			throws IOException {
+		if (ref.wildcard()) {
+			return checkWildcard(dbs, own, display, ref);
+		}
+		if (!store.findAcross(dbs, ref.target()).isEmpty() || jdk.exists(ref.target())) {
+			return Optional.empty();
+		}
+		if (isOwnOrGenerated(own, ref.target())) {
+			return Optional.of(candidate(display, ref, "project-owned or generated, unverified"));
+		}
+		return Optional.of(
+				new Finding(display, (int) ref.line(), FindingKind.MISSING,
+						"import " + ref.target() + " resolves nowhere", suggestion(dbs, ref.target())));
+	}
+
+	private Optional<Finding> checkWildcard(List<Path> dbs, Set<String> own, String display, ImportRef ref)
+			throws IOException {
+		if (packageExists(dbs, own, ref.target())) {
+			return Optional.empty();
+		}
+		if (isOwnOrGenerated(own, ref.target())) {
+			return Optional.of(candidate(display, ref, "project-owned or generated, unverified"));
+		}
+		return Optional.of(
+				new Finding(display, (int) ref.line(), FindingKind.MISSING,
+						"package " + ref.target() + " resolves nowhere", suggestion(dbs, ref.target())));
+	}
+
+	private boolean packageExists(List<Path> dbs, Set<String> own, String name) throws IOException {
+		for (String pkg : own) {
+			if (pkg.equals(name) || pkg.startsWith(name + ".")) {
+				return true;
+			}
+		}
+		for (Path db : dbs) {
+			if (!store.searchIn(db, name + ".", 1).isEmpty()) {
+				return true;
+			}
+		}
+		return jdk.packageExists(name);
+	}
+
+	private static boolean isOwnOrGenerated(Set<String> own, String name) {
+		for (String pkg : own) {
+			if (name.equals(pkg) || name.startsWith(pkg + ".")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static Finding candidate(String display, ImportRef ref, String detail) {
+		return new Finding(display, (int) ref.line(), FindingKind.CANDIDATE,
+				"import " + ref.target() + " " + detail, "");
+	}
+
+	private String suggestion(List<Path> dbs, String name) throws IOException {
+		String simple = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : name;
+		Set<String> names = new LinkedHashSet<>();
+		for (Path db : dbs) {
+			for (Symbol match : store.searchIn(db, simple, 5)) {
+				names.add(match.fqn());
+				if (names.size() >= 3) {
+					break;
+				}
+			}
+			if (names.size() >= 3) {
+				break;
+			}
+		}
+		return names.isEmpty() ? "" : "maybe: " + String.join(", ", names);
+	}
+
+	private static String displayName(Path projectDir, Path file) {
+		try {
+			return projectDir.relativize(file.toAbsolutePath()).toString().replace('\\', '/');
+		} catch (IllegalArgumentException notRelative) {
+			return file.getFileName().toString();
+		}
+	}
+}

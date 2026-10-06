@@ -24,7 +24,7 @@ import java.util.stream.Stream;
  * resolves separately and the union is returned, so multi-module projects
  * never collapse to one arbitrary module.
  */
-public final class MavenResolver {
+public final class MavenResolver implements DependencyResolver {
 
 	/**
 	 * Fully qualified goal: short prefixes fail on machines without a warm
@@ -56,6 +56,7 @@ public final class MavenResolver {
 	 * @return existing jar files, never null
 	 * @throws IOException when every module fails or the union is empty
 	 */
+	@Override
 	public List<Path> resolve(Path projectDir, boolean allowNetwork) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
 		String hash = hashPoms(projectDir);

@@ -22,7 +22,7 @@ public final class LookupService {
 
 	private final JarIndexStore store;
 	private final LibraryIndexer indexer;
-	private final MavenResolver resolver;
+	private final DependencyResolver resolver;
 	private final JdkIndex jdk;
 
 	/**
@@ -34,7 +34,7 @@ public final class LookupService {
 	 * @param jdk      JDK index, never null
 	 * @throws NullPointerException when any argument is {@code null}
 	 */
-	public LookupService(JarIndexStore store, LibraryIndexer indexer, MavenResolver resolver, JdkIndex jdk) {
+	public LookupService(JarIndexStore store, LibraryIndexer indexer, DependencyResolver resolver, JdkIndex jdk) {
 		this.store = Objects.requireNonNull(store, "store");
 		this.indexer = Objects.requireNonNull(indexer, "indexer");
 		this.resolver = Objects.requireNonNull(resolver, "resolver");

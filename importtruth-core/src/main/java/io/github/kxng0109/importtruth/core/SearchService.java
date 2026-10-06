@@ -17,7 +17,7 @@ public final class SearchService {
 
 	private final JarIndexStore store;
 	private final LibraryIndexer indexer;
-	private final MavenResolver resolver;
+	private final DependencyResolver resolver;
 
 	/**
 	 * Creates the service.
@@ -27,7 +27,7 @@ public final class SearchService {
 	 * @param resolver dependency resolver, never null
 	 * @throws NullPointerException when any argument is {@code null}
 	 */
-	public SearchService(JarIndexStore store, LibraryIndexer indexer, MavenResolver resolver) {
+	public SearchService(JarIndexStore store, LibraryIndexer indexer, DependencyResolver resolver) {
 		this.store = Objects.requireNonNull(store, "store");
 		this.indexer = Objects.requireNonNull(indexer, "indexer");
 		this.resolver = Objects.requireNonNull(resolver, "resolver");
