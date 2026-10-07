@@ -72,6 +72,10 @@ Slow tests (real Maven spawns, heavy fixtures) carry `@Tag("slow")`:
 `mvn test` runs the fast loop only, `mvn verify` runs everything
 including coverage gates.
 
+Resolving a multi-module project needs its sibling snapshots
+installed (`mvn install` once); otherwise resolution fails loudly
+rather than guessing. CI runs `install` for exactly this reason.
+
 Every module enforces coverage gates on `verify`: 95% line, 90% branch
 (the `Main` wiring class is excluded; everything else is tested). The
 gates have already caught real bugs, so they stay.
