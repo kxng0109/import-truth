@@ -115,11 +115,23 @@ public final class ImportTruthServer implements AutoCloseable {
 						.tool(searchTool.definition())
 						.callHandler((exchange, request) -> searchTool.call(request.arguments()))
 						.build());
+		LookupSymbolsTool lookupSymbolsTool = new LookupSymbolsTool(lookup);
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(lookupSymbolsTool.definition())
+						.callHandler((exchange, request) -> lookupSymbolsTool.call(request.arguments()))
+						.build());
 		CheckFileTool checkTool = new CheckFileTool(store, indexer, resolver, jdk);
 		server.addTool(
 				McpServerFeatures.SyncToolSpecification.builder()
 						.tool(checkTool.definition())
 						.callHandler((exchange, request) -> checkTool.call(request.arguments()))
+						.build());
+		CheckFilesTool checkFilesTool = new CheckFilesTool(store, indexer, resolver, jdk);
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(checkFilesTool.definition())
+						.callHandler((exchange, request) -> checkFilesTool.call(request.arguments()))
 						.build());
 	}
 

@@ -92,6 +92,14 @@ final class FullServerE2ETest {
 					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
 					+ "\",\"query\":\"Widget\"}}}");
 			assertThat(awaitLine(lines, "\"id\":5")).as("search answer").contains("com.example.Widget");
+			streams.write("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"lookup_symbols\","
+					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
+					+ "\",\"symbols\":[\"com.example.Widget\"]}}}");
+			assertThat(awaitLine(lines, "\"id\":6")).as("batch lookup answer").contains("FOUND DEFINITE");
+			streams.write("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"check_files\","
+					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
+					+ "\",\"filePaths\":[\"" + escape(file.toString()) + "\"]}}}");
+			assertThat(awaitLine(lines, "\"id\":7")).as("batch check answer").contains("clean");
 		}
 		assertThat(errors).as("reader thread errors").isEmpty();
 	}
