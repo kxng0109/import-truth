@@ -10,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CancellationException;
@@ -17,6 +18,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
@@ -35,22 +37,41 @@ final class MavenResolverTest {
 
 	@Test
 	@Tag("slow")
-	@DisplayName("resolves the repository jars and reuses the cache")
-	void resolvesOwnJarsTwice() throws Exception {
-		Path projectDir = Paths.get(System.getProperty("user.dir")).getParent();
-		MavenResolver resolver = new MavenResolver(state);
+	@DisplayName("resolves fixture jars and reuses the cache")
+	void resolvesFixtureJarsTwice() throws Exception {
+		Path root = Files.createTempDirectory("fixture");
+		try {
+			copyWrapper(root);
+			Files.write(root.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+							+ "<artifactId>root</artifactId><version>1</version><packaging>pom</packaging>"
+							+ "<modules><module>lib</module></modules></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			Path lib = root.resolve("lib");
+			Files.createDirectories(lib);
+			Files.write(lib.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+							+ "<artifactId>root</artifactId><version>1</version></parent>"
+							+ "<artifactId>lib</artifactId><dependencies><dependency><groupId>org.junit.jupiter</groupId>"
+							+ "<artifactId>junit-jupiter-api</artifactId><version>6.1.3</version>"
+							+ "<scope>test</scope></dependency></dependencies></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			MavenResolver resolver = new MavenResolver(state);
 
-		List<Path> first = resolver.resolve(projectDir, true);
-		List<Path> second = resolver.resolve(projectDir, true);
+			List<Path> first = resolver.resolve(root, true);
+			List<Path> second = resolver.resolve(root, true);
 
-		assertThat(first).as("resolved jars").isNotEmpty();
-		assertThat(first.stream().allMatch(p -> p.toString().endsWith(".jar") && Files.exists(p)))
-				.as("existing jars only")
-				.isTrue();
-		assertThat(first.stream().anyMatch(p -> p.getFileName().toString().contains("assertj")))
-				.as("contains the assertion library")
-				.isTrue();
-		assertThat(second).as("cached second run").isEqualTo(first);
+			assertThat(first).as("resolved jars").isNotEmpty();
+			assertThat(first.stream().allMatch(p -> p.toString().endsWith(".jar") && Files.exists(p)))
+					.as("existing jars only")
+					.isTrue();
+			assertThat(first.stream().anyMatch(p -> p.getFileName().toString().contains("junit-jupiter-api")))
+					.as("contains the assertion library")
+					.isTrue();
+			assertThat(second).as("cached second run").isEqualTo(first);
+		} finally {
+			deleteTree(root);
+		}
 	}
 
 	@Test
@@ -70,8 +91,7 @@ final class MavenResolverTest {
 					.as("missing wrapper")
 					.isNull();
 		} finally {
-			Files.deleteIfExists(dir.resolve("mvnw.cmd"));
-			Files.deleteIfExists(dir);
+			deleteTree(dir);
 		}
 	}
 
@@ -80,6 +100,7 @@ final class MavenResolverTest {
 	@DisplayName("fails loudly on unresolvable projects")
 	void failsLoudly() throws Exception {
 		Path bare = Files.createTempDirectory("bare");
+		copyWrapper(bare);
 		Files.write(bare.resolve("pom.xml"),
 				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
 						+ "<artifactId>bare</artifactId><version>1</version>"
@@ -88,9 +109,13 @@ final class MavenResolverTest {
 						+ "</dependency></dependencies></project>").getBytes(StandardCharsets.UTF_8));
 		MavenResolver resolver = new MavenResolver(state);
 
-		assertThatThrownBy(() -> resolver.resolve(bare, true))
-				.as("unresolvable fails")
-				.isInstanceOf(IOException.class);
+		try {
+			assertThatThrownBy(() -> resolver.resolve(bare, true))
+					.as("unresolvable fails")
+					.isInstanceOf(IOException.class);
+		} finally {
+			deleteTree(bare);
+		}
 	}
 
 	@Test
@@ -133,6 +158,83 @@ final class MavenResolverTest {
 
 	@Test
 	@Tag("slow")
+	@DisplayName("refuses uninstalled sibling snapshots loudly")
+	void refusesUninstalledSiblings() throws Exception {
+		Path root = Files.createTempDirectory("siblings");
+		copyWrapper(root);
+		Files.write(root.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>root</artifactId><version>1</version><packaging>pom</packaging>"
+						+ "<modules><module>a</module><module>b</module></modules></project>")
+						.getBytes(StandardCharsets.UTF_8));
+		Path a = root.resolve("a");
+		Files.createDirectories(a);
+		Files.write(a.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+						+ "<artifactId>root</artifactId><version>1</version></parent>"
+						+ "<artifactId>a</artifactId><dependencies><dependency><groupId>org.junit.jupiter</groupId>"
+						+ "<artifactId>junit-jupiter-api</artifactId><version>6.1.3</version>"
+						+ "<scope>test</scope></dependency></dependencies></project>")
+						.getBytes(StandardCharsets.UTF_8));
+		Path b = root.resolve("b");
+		Files.createDirectories(b);
+		Files.write(b.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+						+ "<artifactId>root</artifactId><version>1</version></parent>"
+						+ "<artifactId>b</artifactId><dependencies><dependency><groupId>t</groupId>"
+						+ "<artifactId>a</artifactId><version>1</version></dependency></dependencies></project>")
+						.getBytes(StandardCharsets.UTF_8));
+		MavenResolver resolver = new MavenResolver(state);
+
+		try {
+			assertThatThrownBy(() -> resolver.resolve(root, false))
+					.as("sibling snapshots required")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("install");
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@Tag("slow")
+	@DisplayName("fails loudly when any module goes missing")
+	void failsLoudlyOnPartialModules() throws Exception {
+		Path root = Files.createTempDirectory("partial");
+		copyWrapper(root);
+		Files.write(root.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>root</artifactId><version>1</version><packaging>pom</packaging>"
+						+ "<modules><module>good</module><module>bad</module></modules></project>")
+						.getBytes(StandardCharsets.UTF_8));
+		Path good = root.resolve("good");
+		Files.createDirectories(good);
+		Files.write(good.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+						+ "<artifactId>root</artifactId><version>1</version></parent>"
+						+ "<artifactId>good</artifactId></project>").getBytes(StandardCharsets.UTF_8));
+		Path bad = root.resolve("bad");
+		Files.createDirectories(bad);
+		Files.write(bad.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+						+ "<artifactId>root</artifactId><version>1</version></parent>"
+						+ "<artifactId>bad</artifactId><dependencies><dependency><groupId>com.example</groupId>"
+						+ "<artifactId>does-not-exist</artifactId><version>1</version>"
+						+ "</dependency></dependencies></project>").getBytes(StandardCharsets.UTF_8));
+		MavenResolver resolver = new MavenResolver(state);
+
+		try {
+			assertThatThrownBy(() -> resolver.resolve(root, false))
+					.as("partial union refused")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("bad");
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@Tag("slow")
 	@DisplayName("stops on interruption")
 	@Timeout(value = 60, unit = TimeUnit.SECONDS)
 	void stopsOnInterruption() throws Exception {
@@ -171,5 +273,47 @@ final class MavenResolverTest {
 		public int read() throws IOException {
 			throw new IOException("torn down");
 		}
+	}
+
+	/**
+	 * Deletes a fixture tree, best effort. Temp projects must not
+	 * outlive the test that made them.
+	 *
+	 * @param root fixture root, never null
+	 */
+	private static void deleteTree(Path root) {
+		try (Stream<Path> walk = Files.walk(root)) {
+			for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+				Files.deleteIfExists(path);
+			}
+		} catch (IOException ignored) {
+			// Best effort: the OS reclaims temp on reboot regardless.
+		}
+	}
+
+	/**
+	 * Copies the repository wrapper into a fixture project so nested
+	 * Maven runs work far from the checkout, on every OS.
+	 *
+	 * @param root fixture project root, never null
+	 * @throws IOException when the wrapper cannot be copied
+	 */
+	private static void copyWrapper(Path root) throws IOException {
+		Path repo = Paths.get(System.getProperty("user.dir")).getParent();
+		Files.copy(repo.resolve("mvnw"), root.resolve("mvnw"));
+		Files.copy(repo.resolve("mvnw.cmd"), root.resolve("mvnw.cmd"));
+		Path template = repo.resolve(".mvn");
+		try (Stream<Path> walk = Files.walk(template)) {
+			for (Path source : walk.toList()) {
+				Path target = root.resolve(".mvn").resolve(template.relativize(source));
+				if (Files.isDirectory(source)) {
+					Files.createDirectories(target);
+				} else {
+					Files.createDirectories(target.getParent());
+					Files.copy(source, target);
+				}
+			}
+		}
+		root.resolve("mvnw").toFile().setExecutable(true);
 	}
 }
