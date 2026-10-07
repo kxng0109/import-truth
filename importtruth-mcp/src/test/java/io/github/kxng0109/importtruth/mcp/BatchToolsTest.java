@@ -140,6 +140,10 @@ final class BatchToolsTest {
 		assertThat(check.call(Map.of("projectPath", project.toString(), "filePaths", List.of())).isError())
 				.as("empty files rejected")
 				.isTrue();
+		assertThat(textOf(check.call(
+				Map.of("projectPath", project.toString(), "filePaths", List.of(" ", 42)))))
+				.as("all-invalid batch stays successful")
+				.contains("ERROR file path must be a non-blank string");
 		List<String> tooManyFiles = new ArrayList<>();
 		for (int i = 0; i <= CheckFilesTool.MAX_FILES; i++) {
 			tooManyFiles.add("File" + i + ".java");
@@ -160,10 +164,10 @@ final class BatchToolsTest {
 		CheckFilesTool failingCheck = failingFilesTool();
 		Path file = file("Missing.java",
 				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
-		String checkFailure = textOf(failingCheck.call(
-				Map.of("projectPath", project.toString(), "filePaths", List.of(file.toString()))));
+		CallToolResult checkFailure = failingCheck.call(
+				Map.of("projectPath", project.toString(), "filePaths", List.of(file.toString())));
 
-		assertThat(checkFailure).as("check failure per item").startsWith("ERROR " + file);
+		assertThat(checkFailure.isError()).as("resolver failure fails the call").isTrue();
 	}
 
 	private Services services() throws Exception {

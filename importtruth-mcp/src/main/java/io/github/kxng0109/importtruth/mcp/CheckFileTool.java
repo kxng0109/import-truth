@@ -27,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -110,8 +111,29 @@ public final class CheckFileTool {
 	}
 
 	private List<String> check(Path projectDir, Path file) throws IOException {
+		return checkFiles(projectDir, List.of(file)).get(file);
+	}
+
+	/**
+	 * Checks many files sharing one resolution and one policy load.
+	 *
+	 * @param projectDir project root, never null
+	 * @param files      source files, never null
+	 * @return findings per file, in order, never null
+	 * @throws IOException when resolution, indexing, or pack loading fails
+	 */
+	Map<Path, List<String>> checkFiles(Path projectDir, List<Path> files) throws IOException {
 		FileCheckService check = new FileCheckService(store, indexer, resolver, jdk);
 		PolicyEngine policy = loadPack(projectDir);
+		Map<Path, List<String>> answers = new LinkedHashMap<>();
+		for (Path file : files) {
+			answers.put(file, checkOne(check, policy, projectDir, file));
+		}
+		return answers;
+	}
+
+	private List<String> checkOne(
+			FileCheckService check, PolicyEngine policy, Path projectDir, Path file) throws IOException {
 		CheckResult result = check.check(projectDir, file);
 		List<Finding> findings = new ArrayList<>(result.findings());
 		if (result.healthy()) {

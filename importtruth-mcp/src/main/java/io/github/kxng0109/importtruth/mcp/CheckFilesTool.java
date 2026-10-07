@@ -6,6 +6,8 @@ import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
 import io.modelcontextprotocol.spec.McpSchema;
 
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -84,25 +86,34 @@ public final class CheckFilesTool {
 		if (files.size() > MAX_FILES) {
 			return error("at most " + MAX_FILES + " files per call");
 		}
+		List<Path> valid = new ArrayList<>();
 		List<String> lines = new ArrayList<>();
 		for (Object item : files) {
 			if (!(item instanceof String filePath) || filePath.isBlank()) {
 				lines.add("ERROR file path must be a non-blank string");
 				continue;
 			}
-			McpSchema.CallToolResult single =
-					check.call(Map.of("projectPath", projectPath, "filePath", filePath));
-			String text = ((McpSchema.TextContent) single.content().get(0)).text();
-			if (single.isError()) {
-				lines.add("ERROR " + filePath + ": " + text);
-			} else if (text.equals("clean")) {
-				lines.add("clean: " + filePath);
-			} else {
-				lines.addAll(List.of(text.split("\n")));
-			}
+			valid.add(Paths.get(filePath));
 		}
-		McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
+		if (valid.isEmpty()) {
+			McpSchema.TextContent onlyErrors =
+					McpSchema.TextContent.builder(String.join("\n", lines)).build();
+			return new McpSchema.CallToolResult(List.<McpSchema.Content>of(onlyErrors), false, null, null);
+		}
+		try {
+			Map<Path, List<String>> answers = check.checkFiles(Paths.get(projectPath), valid);
+			for (Map.Entry<Path, List<String>> entry : answers.entrySet()) {
+				if (entry.getValue().isEmpty()) {
+					lines.add("clean: " + entry.getKey());
+				} else {
+					lines.addAll(entry.getValue());
+				}
+			}
+			McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
+			return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
+		} catch (Exception failure) {
+			return error("check failed: " + failure.getMessage());
+		}
 	}
 
 	private static McpSchema.CallToolResult error(String message) {
