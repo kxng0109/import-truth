@@ -55,7 +55,7 @@ public final class MavenResolver implements DependencyResolver {
 	 * @param projectDir  project root, never null
 	 * @param allowNetwork true to retry online when offline resolution fails
 	 * @return existing jar files, never null
-	 * @throws IOException when every module fails or the union is empty
+	 * @throws IOException when any module fails or the union is empty
 	 */
 	@Override
 	public List<Path> resolve(Path projectDir, boolean allowNetwork) throws IOException {
@@ -70,9 +70,7 @@ public final class MavenResolver implements DependencyResolver {
 		}
 		Set<Path> union = new LinkedHashSet<>();
 		List<String> failures = new ArrayList<>();
-		int attempted = 0;
 		for (Path module : modulesOf(projectDir)) {
-			attempted++;
 			Path out = stateDir.resolve("resolve").resolve(hash + "." + module.getFileName() + ".new");
 			Files.deleteIfExists(out);
 			ResolveOutcome outcome = runBuildClasspath(projectDir, module, out, true);
@@ -89,9 +87,10 @@ public final class MavenResolver implements DependencyResolver {
 			Files.deleteIfExists(out);
 		}
 		List<Path> jars = List.copyOf(union);
-		if (jars.isEmpty() && !failures.isEmpty() && failures.size() >= attempted) {
-			throw new IOException(
-					"No dependencies resolved for " + projectDir + ": " + String.join(" | ", failures));
+		if (!failures.isEmpty()) {
+			throw new IOException("No dependencies resolved for " + projectDir + ": "
+					+ String.join(" | ", failures)
+					+ " (hint: sibling snapshot modules may need 'mvn install' first)");
 		}
 		Files.writeString(cached, joinClasspath(jars), StandardCharsets.UTF_8);
 		return jars;
