@@ -144,14 +144,74 @@ public final class JarIndexStore implements AutoCloseable {
 	}
 
 	/**
-	 * Searches names by substring, most specific first.
+	 * Tests whether one index holds the name, stopping at the first
+	 * row. Cheaper than {@link #findIn} when only existence matters:
+	 * no ordering, no row materialization.
 	 *
-	 * @param db    index file, never null
-	 * @param query substring, never null
+	 * @param db index file, never null
+	 * @param fqn fully qualified name, never null
+	 * @return true when present, never null postcondition
+	 * @throws IOException when the index cannot be read
+	 */
+	public boolean existsIn(Path db, String fqn) throws IOException {
+		Objects.requireNonNull(db, "db");
+		Objects.requireNonNull(fqn, "fqn");
+		String sql = "SELECT 1 FROM symbols WHERE fqn = ? LIMIT 1";
+		synchronized (this) {
+			try (PreparedStatement statement = readerFor(db).prepareStatement(sql)) {
+				statement.setString(1, fqn);
+				try (ResultSet rows = statement.executeQuery()) {
+					return rows.next();
+				}
+			} catch (SQLException failure) {
+				throw new IOException("Query failed on " + db, failure);
+			}
+		}
+	}
+
+	/**
+	 * Tests whether any index holds the name, stopping at the first
+	 * hit instead of scanning every index.
+	 *
+	 * @param dbs index files, never null
+	 * @param fqn fully qualified name, never null
+	 * @return true when present anywhere
+	 * @throws IOException when an index cannot be read
+	 */
+	public boolean existsAcross(List<Path> dbs, String fqn) throws IOException {
+		Objects.requireNonNull(dbs, "dbs");
+		Objects.requireNonNull(fqn, "fqn");
+		for (Path db : dbs) {
+			if (existsIn(db, fqn)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Searches names by prefix, most specific first. Without a leading
+	 * wildcard the name index can serve the range directly.
+	 *
+	 * @param db index file, never null
+	 * @param prefix leading characters, never null
 	 * @param limit maximum rows, positive
 	 * @return matches ordered by name length, never null
 	 * @throws IOException when the index cannot be read
 	 */
+	public List<Symbol> searchPrefix(Path db, String prefix, int limit) throws IOException {
+		Objects.requireNonNull(db, "db");
+		Objects.requireNonNull(prefix, "prefix");
+		if (limit <= 0) {
+			throw new IllegalArgumentException("limit must be positive");
+		}
+		String sql = "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
+				+ " FROM symbols WHERE fqn LIKE ? ESCAPE '\\' ORDER BY LENGTH(fqn), fqn LIMIT ?";
+		return queryList(db, sql, "Search failed on ", statement -> {
+			statement.setString(1, escapeLike(prefix) + "%");
+			statement.setInt(2, limit);
+		});
+	}
 	public List<Symbol> searchIn(Path db, String query, int limit) throws IOException {
 		Objects.requireNonNull(db, "db");
 		Objects.requireNonNull(query, "query");

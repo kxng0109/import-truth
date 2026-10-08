@@ -105,6 +105,37 @@ final class FileCheckServiceTest {
 	}
 
 	@Test
+	@DisplayName("rejects mid-string package matches")
+	void rejectsMidStringPackages() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/other/Partial.java",
+				"package com.other; import example.*; public class Partial { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.healthy()).as("healthy file").isTrue();
+		assertThat(result.findings()).as("partial package flagged").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("missing kind").isEqualTo(FindingKind.MISSING);
+	}
+
+	@Test
+	@DisplayName("answers JDK names with empty indexes")
+	void answersJdkWithEmptyIndexes() throws Exception {
+		JarIndexStore store = openStore(state.resolve("jdk-only"));
+		LibraryIndexer indexer = jarFile -> List.of();
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of();
+		FileCheckService check =
+				new FileCheckService(store, indexer, resolver, new JdkIndex());
+		Path clean = source("com/other/JdkOnly.java",
+				"package com.other; import java.util.List; public class JdkOnly { List<String> items; }");
+		Path missing = source("com/other/JdkMiss.java",
+				"package com.other; import java.bogus.Nope; public class JdkMiss { Nope nope; }");
+
+		assertThat(check.check(project, clean).findings()).as("JDK hit clean").isEmpty();
+		assertThat(check.check(project, missing).findings()).as("JDK miss flagged").hasSize(1);
+	}
+
+	@Test
 	@DisplayName("treats unresolved own-package names as candidates")
 	void treatsOwnPackageAsCandidate() throws Exception {
 		FileCheckService check = service();

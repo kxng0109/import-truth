@@ -113,10 +113,71 @@ final class JarIndexStoreTest {
 	}
 
 	@Test
+	@DisplayName("tests existence with early exit")
+	void testsExistence() throws Exception {
+		JarIndexStore store = openStore("exists");
+		Path db = store.ensureIndexed(fakeJar("e.jar"), new FakeIndexer());
+
+		assertThat(store.existsIn(db, "com.example.Widget")).as("present").isTrue();
+		assertThat(store.existsIn(db, "com.example.Missing")).as("absent").isFalse();
+		assertThat(store.existsAcross(List.of(db), "com.example.Widget")).as("across hit").isTrue();
+		assertThat(store.existsAcross(List.of(), "com.example.Widget")).as("no indexes").isFalse();
+		assertThatThrownBy(() -> store.searchPrefix(db, "x", 0))
+				.as("non-positive prefix limit rejected")
+				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	@DisplayName("searches by prefix and escapes wildcards")
+	void searchesByPrefix() throws Exception {
+		JarIndexStore store = openStore("prefix");
+		Path db = store.ensureIndexed(fakeJar("p.jar"), new FakeIndexer());
+
+		assertThat(store.searchPrefix(db, "com.example.", 5))
+				.as("prefix finds Widget first")
+				.hasSize(2)
+				.first()
+				.extracting(Symbol::fqn)
+				.isEqualTo("com.example.Widget");
+		assertThat(store.searchPrefix(db, "example.", 5))
+				.as("mid-string prefix misses")
+				.isEmpty();
+		assertThat(store.searchPrefix(db, "com.example_Widget", 5))
+				.as("underscore escaped literally")
+				.isEmpty();
+	}
+
+	@Test
+	@DisplayName("rejects null existence and prefix queries")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullExistence() throws Exception {
+		JarIndexStore store = openStore("exists-null");
+		Path db = store.ensureIndexed(fakeJar("n.jar"), new FakeIndexer());
+
+		assertThatThrownBy(() -> store.existsIn(null, "a.B"))
+				.as("null db rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> store.existsIn(db, null))
+				.as("null name rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> store.existsAcross(null, "a.B"))
+				.as("null dbs rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> store.existsAcross(List.of(db), null))
+				.as("null across name rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> store.searchPrefix(null, "a.", 5))
+				.as("null prefix db rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> store.searchPrefix(db, null, 5))
+				.as("null prefix rejection")
+				.isInstanceOf(NullPointerException.class);
+	}
+
+	@Test
 	@DisplayName("rejects null insensitive queries")
 	@SuppressWarnings("DataFlowIssue")
-	void rejectsNullInsensitive() throws Exception {
-		JarIndexStore store = openStore("insensitive-null");
+	void rejectsNullInsensitive() throws Exception {		JarIndexStore store = openStore("insensitive-null");
 		Path db = store.ensureIndexed(fakeJar("null.jar"), new FakeIndexer());
 
 		assertThatThrownBy(() -> store.searchInInsensitive(null, "x", 5))
