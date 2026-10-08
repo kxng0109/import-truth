@@ -236,7 +236,11 @@ public final class MavenResolver implements DependencyResolver {
 		Process process;
 		StringBuilder log = new StringBuilder();
 		try {
-			process = new ProcessBuilder(command).directory(projectDir.toFile()).redirectErrorStream(true).start();
+			ProcessBuilder builder = new ProcessBuilder(command)
+					.directory(projectDir.toFile())
+					.redirectErrorStream(true);
+			defaultChildHeap(builder.environment());
+			process = builder.start();
 		} catch (IOException failed) {
 			return new ResolveOutcome(false, "cannot start " + command.get(0) + ": " + failed.getMessage());
 		}
@@ -261,6 +265,20 @@ public final class MavenResolver implements DependencyResolver {
 		String tail = log.length() > 500 ? log.substring(log.length() - 500) : log.toString();
 		boolean ok = process.exitValue() == 0 && Files.exists(out);
 		return new ResolveOutcome(ok, ok ? "" : ("exit=" + process.exitValue() + " " + tail.trim()));
+	}
+
+	/**
+	 * Caps nested Maven heap at 512m unless the user already tunes the
+	 * child JVM. Resolving classpaths never needs a gigabyte heap.
+	 *
+	 * @param environment child environment, never null
+	 */
+	static void defaultChildHeap(Map<String, String> environment) {
+		if (!environment.containsKey("MAVEN_OPTS")
+				&& !environment.containsKey("JAVA_TOOL_OPTIONS")
+				&& !environment.containsKey("JDK_JAVA_OPTIONS")) {
+			environment.put("MAVEN_OPTS", "-Xmx512m");
+		}
 	}
 
 	private record ResolveOutcome(boolean ok, String tail) {

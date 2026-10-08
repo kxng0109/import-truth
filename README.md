@@ -100,6 +100,15 @@ opencode plugin: opencode-plugin/importtruth.ts
 IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.3.0-SNAPSHOT.jar
 ```
 
+For a small footprint, start the server with a capped heap and the
+serial collector:
+
+```text
+java -Xms64m -Xmx256m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m -jar <path>/importtruth-cli-0.3.0-SNAPSHOT.jar
+```
+
+Nested Maven runs inherit a 512m cap unless MAVEN_OPTS is already set.
+
 Direct check of files (exit 1 on missing imports, silent when clean):
 
 ```text

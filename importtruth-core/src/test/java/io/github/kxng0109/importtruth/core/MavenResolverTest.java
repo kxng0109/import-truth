@@ -12,7 +12,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.Executors;
@@ -216,6 +218,25 @@ final class MavenResolverTest {
 				.isInstanceOf(IOException.class);
 		assertThatThrownBy(() -> MavenResolver.readClasspath(gone)).as("missing jar")
 				.isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("caps nested Maven heap without overriding user tuning")
+	void capsChildHeap() {
+		Map<String, String> empty = new HashMap<>();
+		MavenResolver.defaultChildHeap(empty);
+
+		assertThat(empty).as("default cap applied").containsEntry("MAVEN_OPTS", "-Xmx512m");
+
+		Map<String, String> tuned = new HashMap<>(Map.of("MAVEN_OPTS", "-Xmx2g"));
+		MavenResolver.defaultChildHeap(tuned);
+
+		assertThat(tuned).as("user tuning kept").containsEntry("MAVEN_OPTS", "-Xmx2g");
+
+		Map<String, String> picked = new HashMap<>(Map.of("JAVA_TOOL_OPTIONS", "-Xmx1g"));
+		MavenResolver.defaultChildHeap(picked);
+
+		assertThat(picked).as("alternate tuning kept").doesNotContainKey("MAVEN_OPTS");
 	}
 
 	@Test
