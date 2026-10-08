@@ -8,9 +8,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,6 +31,12 @@ import java.util.stream.Stream;
  * never collapse to one arbitrary module.
  */
 public final class MavenResolver implements DependencyResolver {
+
+	/**
+	 * Maximum pom-search depth. Module trees deeper than this are
+	 * pathological; the crawl stops instead of trapping the server.
+	 */
+	static final int MAX_POM_DEPTH = 8;
 
 	/**
 	 * Fully qualified goal: short prefixes fail on machines without a warm
@@ -90,9 +99,14 @@ public final class MavenResolver implements DependencyResolver {
 		Set<Path> union = new LinkedHashSet<>();
 		List<String> failures = new ArrayList<>();
 		for (Path module : modulesOf(projectDir)) {
-			Path out = stateDir.resolve("resolve")
-					.resolve(hash + "." + module.getFileName() + "." + Thread.currentThread().threadId()
-							+ "." + System.nanoTime() + ".new");
+			// Maven resolves the output property against the module
+			// directory, so the scratch file is a bare filename there:
+			// spaceless, quoteless, and unique per attempt. A stale
+			// sibling from a killed run is reclaimed first.
+			sweepScratch(module);
+			String scratch = ".importtruth-" + hash + "." + Thread.currentThread().threadId()
+					+ "." + System.nanoTime() + ".cp.tmp";
+			Path out = module.resolve(scratch);
 			Files.deleteIfExists(out);
 			ResolveOutcome outcome = runBuildClasspath(projectDir, module, out, true);
 			if (!outcome.ok() && allowNetwork) {
@@ -148,6 +162,18 @@ public final class MavenResolver implements DependencyResolver {
 	private record PomStat(Path path, long modified, long size) {
 	}
 
+	private static void sweepScratch(Path module) {
+		try (Stream<Path> siblings = Files.list(module)) {
+			for (Path sibling : siblings.filter(p -> {
+				String name = p.getFileName().toString();
+				return name.startsWith(".importtruth-") && name.endsWith(".cp.tmp");
+			}).toList()) {
+				Files.deleteIfExists(sibling);
+			}
+		} catch (IOException | RuntimeException ignored) {
+			// Best effort: a leftover is overwritten or ignored below.
+		}
+	}
 	private static List<Path> modulesOf(Path projectDir) throws IOException {
 		List<Path> modules = new ArrayList<>();
 		if (Files.exists(projectDir.resolve("pom.xml"))) {
@@ -167,9 +193,24 @@ public final class MavenResolver implements DependencyResolver {
 
 	private String hashPoms(Path projectDir) throws IOException {
 		List<Path> poms = new ArrayList<>();
-		try (Stream<Path> walk = Files.walk(projectDir)) {
-			walk.filter(p -> p.getFileName().toString().equals("pom.xml")).sorted().forEach(poms::add);
-		}
+		// Bounded crawl: deep or restricted trees (system directories,
+		// runaway mounts) must never trap resolution. Denied subtrees
+		// are skipped, depth is capped, links are not followed.
+		Files.walkFileTree(projectDir, Set.of(), MAX_POM_DEPTH, new SimpleFileVisitor<>() {
+			@Override
+			public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+				if (file.getFileName().toString().equals("pom.xml")) {
+					poms.add(file);
+				}
+				return FileVisitResult.CONTINUE;
+			}
+
+			@Override
+			public FileVisitResult visitFileFailed(Path file, IOException exc) {
+				return FileVisitResult.SKIP_SUBTREE;
+			}
+		});
+		poms.sort(null);
 		StringBuilder seed = new StringBuilder();
 		for (Path pom : poms) {
 			seed.append(projectDir.relativize(pom)).append('\n');
@@ -180,11 +221,13 @@ public final class MavenResolver implements DependencyResolver {
 
 	private ResolveOutcome runBuildClasspath(Path projectDir, Path module, Path out, boolean offline)
 			throws IOException {
-		List<String> command = new ArrayList<>(launcher(findWrapper(module)));
+		List<String> command = new ArrayList<>(launcher(projectDir, findWrapper(module)));
+		// The output property is a bare filename: Maven resolves it
+		// against the module directory, so it stays spaceless.
 		command.addAll(List.of(
-				"-f", module.resolve("pom.xml").toAbsolutePath().toString(),
+				"-f", argFor(projectDir, module.resolve("pom.xml")),
 				"-B", "-ntp", "-q",
-				"-Dmdep.outputFile=" + out.toAbsolutePath(),
+				"-Dmdep.outputFile=" + out.getFileName().toString(),
 				"-Dmdep.includeScope=test",
 				BUILD_CLASSPATH));
 		if (offline) {
@@ -193,7 +236,11 @@ public final class MavenResolver implements DependencyResolver {
 		Process process;
 		StringBuilder log = new StringBuilder();
 		try {
-			process = new ProcessBuilder(command).directory(projectDir.toFile()).redirectErrorStream(true).start();
+			ProcessBuilder builder = new ProcessBuilder(command)
+					.directory(projectDir.toFile())
+					.redirectErrorStream(true);
+			defaultChildHeap(builder.environment());
+			process = builder.start();
 		} catch (IOException failed) {
 			return new ResolveOutcome(false, "cannot start " + command.get(0) + ": " + failed.getMessage());
 		}
@@ -218,6 +265,20 @@ public final class MavenResolver implements DependencyResolver {
 		String tail = log.length() > 500 ? log.substring(log.length() - 500) : log.toString();
 		boolean ok = process.exitValue() == 0 && Files.exists(out);
 		return new ResolveOutcome(ok, ok ? "" : ("exit=" + process.exitValue() + " " + tail.trim()));
+	}
+
+	/**
+	 * Caps nested Maven heap at 512m unless the user already tunes the
+	 * child JVM. Resolving classpaths never needs a gigabyte heap.
+	 *
+	 * @param environment child environment, never null
+	 */
+	static void defaultChildHeap(Map<String, String> environment) {
+		if (!environment.containsKey("MAVEN_OPTS")
+				&& !environment.containsKey("JAVA_TOOL_OPTIONS")
+				&& !environment.containsKey("JDK_JAVA_OPTIONS")) {
+			environment.put("MAVEN_OPTS", "-Xmx512m");
+		}
 	}
 
 	private record ResolveOutcome(boolean ok, String tail) {
@@ -260,18 +321,38 @@ public final class MavenResolver implements DependencyResolver {
 		return null;
 	}
 
-	private static List<String> launcher(Path wrapper) {
-		return launcher(wrapper, isWindows());
+	private static List<String> launcher(Path projectDir, Path wrapper) {
+		return launcher(projectDir, wrapper, isWindows());
 	}
 
-	static List<String> launcher(Path wrapper, boolean windows) {
+	/**
+	 * Builds the process command. Paths go in relative to the
+	 * project directory (which is also the child working directory)
+	 * so {@code cmd /d /c} never sees a spaced token it would split.
+	 * Absolute paths survive only above the project root.
+	 */
+	static List<String> launcher(Path projectDir, Path wrapper, boolean windows) {
 		if (wrapper == null) {
 			return List.of(windows ? "mvn.cmd" : "mvn");
 		}
+		String target = argFor(projectDir, wrapper.toAbsolutePath());
 		if (windows) {
-			return List.of("cmd", "/d", "/c", wrapper.toAbsolutePath().toString());
+			return List.of("cmd", "/d", "/c", target);
 		}
-		return List.of("sh", wrapper.toAbsolutePath().toString());
+		return List.of("sh", target);
+	}
+
+	/**
+	 * Renders {@code path} relative to {@code cwd} when contained,
+	 * absolute otherwise. Relative tokens need no shell quoting.
+	 */
+	static String argFor(Path cwd, Path path) {
+		Path base = cwd.toAbsolutePath().normalize();
+		Path absolute = path.toAbsolutePath().normalize();
+		if (absolute.startsWith(base)) {
+			return base.relativize(absolute).toString();
+		}
+		return absolute.toString();
 	}
 
 	private static boolean isWindows() {

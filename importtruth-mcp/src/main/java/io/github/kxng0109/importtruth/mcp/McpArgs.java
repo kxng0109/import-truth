@@ -24,7 +24,8 @@ final class McpArgs {
 		Objects.requireNonNull(arguments, "arguments");
 		Objects.requireNonNull(name, "name");
 		Object value = arguments.get(name);
-		if (!(value instanceof String text) || text.isBlank()) {
+		if (!(value instanceof String text) || text.isBlank()
+				|| text.indexOf('\n') >= 0 || text.indexOf('\r') >= 0) {
 			return Optional.empty();
 		}
 		return Optional.of(text);

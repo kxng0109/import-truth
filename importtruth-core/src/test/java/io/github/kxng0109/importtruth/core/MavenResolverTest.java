@@ -12,7 +12,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.Executors;
@@ -84,16 +86,74 @@ final class MavenResolverTest {
 			Path script = dir.resolve("mvnw.cmd");
 			Files.write(script, "x".getBytes(StandardCharsets.UTF_8));
 
-			assertThat(MavenResolver.launcher(null, true)).as("windows fallback").containsExactly("mvn.cmd");
-			assertThat(MavenResolver.launcher(null, false)).as("unix fallback").containsExactly("mvn");
-			assertThat(MavenResolver.launcher(script, true).get(0)).as("windows shell").isEqualTo("cmd");
-			assertThat(MavenResolver.launcher(script, false).get(0)).as("unix shell").isEqualTo("sh");
+			assertThat(MavenResolver.launcher(dir, null, true)).as("windows fallback")
+					.containsExactly("mvn.cmd");
+			assertThat(MavenResolver.launcher(dir, null, false)).as("unix fallback").containsExactly("mvn");
+			assertThat(MavenResolver.launcher(dir, script, true))
+					.as("windows wrapper relative")
+					.containsExactly("cmd", "/d", "/c", "mvnw.cmd");
+			assertThat(MavenResolver.launcher(dir, script, false))
+					.as("unix wrapper relative")
+					.containsExactly("sh", "mvnw.cmd");
+			assertThat(MavenResolver.launcher(dir.resolve("elsewhere"), script, true).get(3))
+					.as("outside wrapper stays absolute")
+					.isEqualTo(script.toAbsolutePath().normalize().toString());
 			assertThat(MavenResolver.findWrapper(dir, true)).as("windows wrapper").isEqualTo(script);
 			assertThat(MavenResolver.findWrapper(dir.resolve("deep").resolve("nested"), false))
 					.as("missing wrapper")
 					.isNull();
 		} finally {
 			deleteTree(dir);
+		}
+	}
+
+	@Test
+	@DisplayName("renders paths relative to the project when contained")
+	void relativizesArguments() throws Exception {
+		Path root = Files.createTempDirectory("relargs");
+		try {
+			Path inside = root.resolve("m.cmd");
+			Files.write(inside, "x".getBytes(StandardCharsets.UTF_8));
+
+			assertThat(MavenResolver.argFor(root, inside)).as("contained relativized")
+					.isEqualTo("m.cmd");
+			assertThat(MavenResolver.argFor(root.resolve("sub"), inside)).as("sibling unrelativized")
+					.isEqualTo(inside.toAbsolutePath().normalize().toString());
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@Tag("slow")
+	@DisplayName("resolves projects whose paths contain spaces")
+	void resolvesSpacedPaths() throws Exception {
+		Path root = Files.createTempDirectory("spaced root");
+		try {
+			copyWrapper(root);
+			Files.write(root.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+							+ "<artifactId>spaced</artifactId><version>1</version><packaging>pom</packaging>"
+							+ "<modules><module>my lib</module></modules></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			Path lib = root.resolve("my lib");
+			Files.createDirectories(lib);
+			Files.write(lib.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+							+ "<artifactId>spaced</artifactId><version>1</version></parent>"
+							+ "<artifactId>lib</artifactId><dependencies><dependency><groupId>org.junit.jupiter</groupId>"
+							+ "<artifactId>junit-jupiter-api</artifactId><version>6.1.3</version>"
+							+ "<scope>test</scope></dependency></dependencies></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			MavenResolver resolver = new MavenResolver(state);
+
+			List<Path> jars = resolver.resolve(root, true);
+
+			assertThat(jars.stream().anyMatch(p -> p.getFileName().toString().contains("junit-jupiter-api")))
+					.as("spaced project resolved")
+					.isTrue();
+		} finally {
+			deleteTree(root);
 		}
 	}
 
@@ -158,6 +218,25 @@ final class MavenResolverTest {
 				.isInstanceOf(IOException.class);
 		assertThatThrownBy(() -> MavenResolver.readClasspath(gone)).as("missing jar")
 				.isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("caps nested Maven heap without overriding user tuning")
+	void capsChildHeap() {
+		Map<String, String> empty = new HashMap<>();
+		MavenResolver.defaultChildHeap(empty);
+
+		assertThat(empty).as("default cap applied").containsEntry("MAVEN_OPTS", "-Xmx512m");
+
+		Map<String, String> tuned = new HashMap<>(Map.of("MAVEN_OPTS", "-Xmx2g"));
+		MavenResolver.defaultChildHeap(tuned);
+
+		assertThat(tuned).as("user tuning kept").containsEntry("MAVEN_OPTS", "-Xmx2g");
+
+		Map<String, String> picked = new HashMap<>(Map.of("JAVA_TOOL_OPTIONS", "-Xmx1g"));
+		MavenResolver.defaultChildHeap(picked);
+
+		assertThat(picked).as("alternate tuning kept").doesNotContainKey("MAVEN_OPTS");
 	}
 
 	@Test
