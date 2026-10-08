@@ -28,16 +28,31 @@ public final class Sha256 {
 	 */
 	public static String ofFile(Path file) throws IOException {
 		Objects.requireNonNull(file, "file");
-		MessageDigest digest;
-		try {
-			digest = MessageDigest.getInstance("SHA-256");
-		} catch (NoSuchAlgorithmException missing) {
-			throw new IllegalStateException("SHA-256 unavailable", missing);
-		}
+		MessageDigest digest = digest();
 		try (InputStream in = Files.newInputStream(file);
 				DigestInputStream hashed = new DigestInputStream(in, digest)) {
 			hashed.readAllBytes();
 		}
 		return HexFormat.of().formatHex(digest.digest());
+	}
+
+	/**
+	 * Digests bytes.
+	 *
+	 * @param bytes content, never null
+	 * @return lowercase hex digest, never null
+	 * @throws NullPointerException if {@code bytes} is {@code null}
+	 */
+	public static String ofBytes(byte[] bytes) {
+		Objects.requireNonNull(bytes, "bytes");
+		return HexFormat.of().formatHex(digest().digest(bytes));
+	}
+
+	private static MessageDigest digest() {
+		try {
+			return MessageDigest.getInstance("SHA-256");
+		} catch (NoSuchAlgorithmException missing) {
+			throw new IllegalStateException("SHA-256 unavailable", missing);
+		}
 	}
 }

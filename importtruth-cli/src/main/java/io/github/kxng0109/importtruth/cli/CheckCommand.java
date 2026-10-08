@@ -1,31 +1,30 @@
 package io.github.kxng0109.importtruth.cli;
 
+import io.github.kxng0109.importtruth.core.CheckOrchestrator;
 import io.github.kxng0109.importtruth.core.DependencyResolver;
+import io.github.kxng0109.importtruth.core.DisplayNames;
 import io.github.kxng0109.importtruth.core.FileCheckService;
 import io.github.kxng0109.importtruth.core.JdkIndex;
+import io.github.kxng0109.importtruth.core.JdkTarget;
 import io.github.kxng0109.importtruth.core.ProjectPackages;
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.CheckResult;
 import io.github.kxng0109.importtruth.model.Finding;
 import io.github.kxng0109.importtruth.model.FindingKind;
-import io.github.kxng0109.importtruth.model.ImportVerdict;
+import io.github.kxng0109.importtruth.model.Findings;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
-import io.github.kxng0109.importtruth.model.PolicyHit;
 import io.github.kxng0109.importtruth.model.PolicyPack;
 import io.github.kxng0109.importtruth.model.PolicyRule;
 import io.github.kxng0109.importtruth.policy.PackLoader;
+import io.github.kxng0109.importtruth.policy.PolicyCache;
 import io.github.kxng0109.importtruth.policy.PolicyEngine;
 import io.github.kxng0109.importtruth.policy.PolicyValidator;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.PrintStream;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -38,6 +37,7 @@ public final class CheckCommand {
 	private final LibraryIndexer indexer;
 	private final DependencyResolver resolver;
 	private final JdkIndex jdk;
+	private final PolicyCache engines = new PolicyCache();
 
 	/**
 	 * Creates the command.
@@ -71,92 +71,39 @@ public final class CheckCommand {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(file, "file");
 		FileCheckService check = new FileCheckService(store, indexer, resolver, jdk);
-		PolicyEngine policy = loadPack(projectDir, err, check);
-		CheckResult result = check.check(projectDir, file);
+		List<Path> jars = resolver.resolve(projectDir, false);
+		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
+		Set<String> own = ProjectPackages.of(projectDir);
+		PolicyEngine policy = loadPack(projectDir, err, jars, dbs, own);
+		CheckResult result = check.checkWith(projectDir, file, dbs, own);
 		if (!result.healthy()) {
 			return 0;
 		}
-		List<Finding> findings = new ArrayList<>(result.findings());
-		for (ImportVerdict verdict : result.verdicts()) {
-			if (!verdict.resolved()) {
-				continue;
-			}
-			Optional<PolicyHit> hit = policy.evaluate(verdict.target(), true);
-			if (hit.isPresent()) {
-				findings.add(new Finding(display(projectDir, file), (int) verdict.line(),
-						FindingKind.POLICY, hit.get().detail(), hit.get().suggestion()));
-			}
-		}
+		List<Finding> findings = CheckOrchestrator.applyPolicy(
+				result,
+				target -> policy.evaluate(target, true),
+				DisplayNames.relativizeOrFileName(projectDir, file));
 		for (Finding finding : findings) {
-			StringBuilder line = new StringBuilder(finding.file()).append(':').append(finding.line())
-					.append(' ').append(finding.kind().name())
-					.append(' ').append(finding.detail());
-			if (!finding.suggestion().isEmpty()) {
-				line.append(" (").append(finding.suggestion()).append(')');
-			}
-			out.println(line);
+			out.println(Findings.format(finding));
 		}
 		return findings.stream().anyMatch(f -> f.kind() == FindingKind.MISSING) ? 1 : 0;
 	}
 
-	private PolicyEngine loadPack(Path projectDir, PrintStream err, FileCheckService check) throws IOException {
-		Path override = projectDir.resolve(".importtruth.yml");
-		PolicyPack pack;
-		if (Files.exists(override)) {
-			try (InputStream in = Files.newInputStream(override)) {
-				pack = PackLoader.load("project", in);
+	private PolicyEngine loadPack(
+			Path projectDir, PrintStream err, List<Path> jars, List<Path> dbs, Set<String> own)
+			throws IOException {
+		PolicyPack pack = PackLoader.loadProjectPack(CheckCommand.class, projectDir);
+		int target = JdkTarget.of(projectDir).orElse(-1);
+		return engines.engine(pack, CheckOrchestrator.scopeKey(jars, dbs, own, target), validated -> {
+			List<PolicyRule> active = PolicyValidator.activeRules(
+					validated,
+					name -> CheckOrchestrator.packageResolves(store, jdk, dbs, own, name, target),
+					name -> CheckOrchestrator.typeResolves(store, jdk, dbs, name, target));
+			if (active.size() != validated.rules().size()) {
+				err.println("policy: " + (validated.rules().size() - active.size())
+						+ " rule(s) disabled, targets missing");
 			}
-		} else {
-			try (InputStream in = CheckCommand.class.getResourceAsStream("/packs/jackson3.yaml")) {
-				pack = PackLoader.load("jackson3", in);
-			}
-		}
-		List<Path> dbs = new ArrayList<>();
-		for (Path jar : resolver.resolve(projectDir, false)) {
-			dbs.add(store.ensureIndexed(jar, indexer));
-		}
-		Set<String> own = ProjectPackages.of(projectDir);
-		List<PolicyRule> active = PolicyValidator.activeRules(
-				pack,
-				name -> packageResolves(dbs, own, name),
-				name -> typeResolves(dbs, name));
-		if (active.size() != pack.rules().size()) {
-			err.println("policy: " + (pack.rules().size() - active.size()) + " rule(s) disabled, targets missing");
-		}
-		return new PolicyEngine(new PolicyPack(pack.name(), active));
-	}
-
-	private boolean typeResolves(List<Path> dbs, String name) {
-		try {
-			return !store.findAcross(dbs, name).isEmpty() || jdk.exists(name);
-		} catch (IOException failed) {
-			return false;
-		}
-	}
-
-	private boolean packageResolves(List<Path> dbs, Set<String> own, String name) {
-		for (String pkg : own) {
-			if (pkg.equals(name) || pkg.startsWith(name + ".")) {
-				return true;
-			}
-		}
-		try {
-			for (Path db : dbs) {
-				if (!store.searchIn(db, name + ".", 1).isEmpty()) {
-					return true;
-				}
-			}
-		} catch (IOException failed) {
-			return false;
-		}
-		return jdk.packageExists(name);
-	}
-
-	private static String display(Path projectDir, Path file) {
-		try {
-			return projectDir.relativize(file.toAbsolutePath()).toString().replace('\\', '/');
-		} catch (IllegalArgumentException notRelative) {
-			return file.getFileName().toString();
-		}
+			return active;
+		});
 	}
 }

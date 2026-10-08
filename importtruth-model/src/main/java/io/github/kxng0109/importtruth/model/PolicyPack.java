@@ -18,11 +18,8 @@ public record PolicyPack(String name, List<PolicyRule> rules) {
 	 * @throws IllegalArgumentException if {@code name} is blank
 	 */
 	public PolicyPack {
-		Objects.requireNonNull(name, "name");
+		name = Preconditions.requireNonBlank(name, "name");
 		Objects.requireNonNull(rules, "rules");
-		if (name.isBlank()) {
-			throw new IllegalArgumentException("name must not be blank");
-		}
 		rules = List.copyOf(rules);
 	}
 }

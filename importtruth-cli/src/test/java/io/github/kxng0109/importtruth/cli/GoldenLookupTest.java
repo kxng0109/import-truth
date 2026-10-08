@@ -2,8 +2,10 @@ package io.github.kxng0109.importtruth.cli;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
@@ -12,6 +14,7 @@ import java.util.concurrent.TimeUnit;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
 import io.modelcontextprotocol.spec.McpSchema.TextContent;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -39,6 +42,26 @@ final class GoldenLookupTest {
 
 	@TempDir
 	private Path state;
+
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(Path dir) throws IOException {
+		JarIndexStore created = new JarIndexStore(dir);
+		openStores.add(created);
+		return created;
+	}
 
 	@Test
 	@DisplayName("finds both Jackson generations and flags JDK hits")
@@ -87,8 +110,24 @@ final class GoldenLookupTest {
 		assertThat(bad).as("bad arguments rejected").isNotBlank();
 	}
 
+	@Test
+	@DisplayName("rejects calls missing the symbol as errors")
+	void rejectsMissingSymbol() throws Exception {
+		Wiring wiring = wiring();
+		LookupTool lookup = new LookupTool(wiring.lookup());
+		String project = Paths.get(System.getProperty("user.dir")).getParent().toString();
+
+		CallToolResult result = lookup.call(Map.of("projectPath", project));
+
+		assertThat(result.isError()).as("error flag").isTrue();
+		assertThat(((TextContent) result.content().get(0)).text())
+				.as("names the missing arguments")
+				.contains("projectPath")
+				.contains("symbol");
+	}
+
 	private Wiring wiring() throws Exception {
-		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		JarIndexStore store = openStore(state.resolve("index"));
 		LibraryIndexer indexer = ServiceLoader.load(LibraryIndexer.class).findFirst().orElseThrow(
 				() -> new IllegalStateException("No LibraryIndexer on the test classpath"));
 		MavenResolver resolver = new MavenResolver(state);

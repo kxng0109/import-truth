@@ -1,5 +1,6 @@
 package io.github.kxng0109.importtruth.policy;
 
+import io.github.kxng0109.importtruth.model.Packages;
 import io.github.kxng0109.importtruth.model.PolicyHit;
 import io.github.kxng0109.importtruth.model.PolicyPack;
 import io.github.kxng0109.importtruth.model.PolicyRule;
@@ -51,29 +52,22 @@ public final class PolicyEngine {
 		return switch (rule.kind()) {
 			case ALLOW -> Optional.empty();
 			case PREFER -> {
-				if (under(rule.subject(), target)) {
+				if (Packages.contains(rule.subject(), target)) {
 					String detail = rule.message().isEmpty()
 							? "prefer " + rule.target() + " over " + rule.subject()
 							: rule.message();
-					yield Optional.of(new PolicyHit(detail, "use " + rebased(rule.subject(), rule.target(), target)));
+					yield Optional.of(new PolicyHit(detail,
+							"use " + rule.target() + target.substring(rule.subject().length())));
 				}
 				yield Optional.empty();
 			}
 			case RENAME -> {
-				if (target.equals(rule.subject()) || target.startsWith(rule.subject() + ".")) {
+				if (Packages.contains(rule.subject(), target)) {
 					String replacement = rule.target() + target.substring(rule.subject().length());
 					yield Optional.of(new PolicyHit("renamed to " + replacement, "use " + replacement));
 				}
 				yield Optional.empty();
 			}
 		};
-	}
-
-	private static boolean under(String pkg, String target) {
-		return target.equals(pkg) || target.startsWith(pkg + ".");
-	}
-
-	private static String rebased(String from, String to, String target) {
-		return to + target.substring(from.length());
 	}
 }

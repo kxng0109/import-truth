@@ -1,5 +1,7 @@
 package io.github.kxng0109.importtruth.core;
 
+import io.github.kxng0109.importtruth.index.Sha256;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -8,14 +10,14 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -35,6 +37,7 @@ public final class MavenResolver implements DependencyResolver {
 			"org.apache.maven.plugins:maven-dependency-plugin:3.11.0:build-classpath";
 
 	private final Path stateDir;
+	private final Map<Path, MemEntry> memory = new ConcurrentHashMap<>();
 
 	/**
 	 * Creates the resolver.
@@ -60,18 +63,36 @@ public final class MavenResolver implements DependencyResolver {
 	@Override
 	public List<Path> resolve(Path projectDir, boolean allowNetwork) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
+		Path key = projectDir.toAbsolutePath().normalize();
+		MemEntry remembered = memory.get(key);
+		if (remembered != null) {
+			try {
+				if (pomStats(projectDir).equals(remembered.poms())) {
+					return remembered.jars();
+				}
+			} catch (IOException unreadable) {
+				// Fall through to the authoritative hashed path below.
+			}
+		}
 		String hash = hashPoms(projectDir);
 		Path cached = stateDir.resolve("resolve").resolve(hash + ".cp");
 		if (Files.exists(cached)) {
-			List<Path> jars = readClasspath(cached);
-			if (!jars.isEmpty()) {
-				return jars;
+			try {
+				List<Path> jars = readClasspath(cached);
+				if (!jars.isEmpty()) {
+					remember(key, projectDir, hash, jars);
+					return jars;
+				}
+			} catch (IOException stale) {
+				Files.deleteIfExists(cached);
 			}
 		}
 		Set<Path> union = new LinkedHashSet<>();
 		List<String> failures = new ArrayList<>();
 		for (Path module : modulesOf(projectDir)) {
-			Path out = stateDir.resolve("resolve").resolve(hash + "." + module.getFileName() + ".new");
+			Path out = stateDir.resolve("resolve")
+					.resolve(hash + "." + module.getFileName() + "." + Thread.currentThread().threadId()
+							+ "." + System.nanoTime() + ".new");
 			Files.deleteIfExists(out);
 			ResolveOutcome outcome = runBuildClasspath(projectDir, module, out, true);
 			if (!outcome.ok() && allowNetwork) {
@@ -92,11 +113,42 @@ public final class MavenResolver implements DependencyResolver {
 					+ String.join(" | ", failures)
 					+ " (hint: sibling snapshot modules may need 'mvn install' first)");
 		}
-		Files.writeString(cached, joinClasspath(jars), StandardCharsets.UTF_8);
+		Path staged = stateDir.resolve("resolve").resolve(hash + "." + Thread.currentThread().threadId()
+				+ "." + System.nanoTime() + ".tmp");
+		try {
+			Files.writeString(staged, joinClasspath(jars), StandardCharsets.UTF_8);
+			Files.move(staged, cached, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+		} finally {
+			Files.deleteIfExists(staged);
+		}
+		remember(key, projectDir, hash, jars);
 		return jars;
 	}
 
-	private List<Path> modulesOf(Path projectDir) throws IOException {
+	/**
+	 * Remembers a resolution. Entries hold paths plus numbers, one per
+	 * distinct project directory, so long sessions stay flat.
+	 */
+	private void remember(Path key, Path projectDir, String hash, List<Path> jars) throws IOException {
+		memory.put(key, new MemEntry(pomStats(projectDir), hash, jars));
+	}
+
+	private static List<PomStat> pomStats(Path projectDir) throws IOException {
+		List<PomStat> stats = new ArrayList<>();
+		for (Path module : modulesOf(projectDir)) {
+			Path pom = module.resolve("pom.xml");
+			stats.add(new PomStat(pom, Files.getLastModifiedTime(pom).toMillis(), Files.size(pom)));
+		}
+		return stats;
+	}
+
+	private record MemEntry(List<PomStat> poms, String hash, List<Path> jars) {
+	}
+
+	private record PomStat(Path path, long modified, long size) {
+	}
+
+	private static List<Path> modulesOf(Path projectDir) throws IOException {
 		List<Path> modules = new ArrayList<>();
 		if (Files.exists(projectDir.resolve("pom.xml"))) {
 			modules.add(projectDir);
@@ -123,12 +175,7 @@ public final class MavenResolver implements DependencyResolver {
 			seed.append(projectDir.relativize(pom)).append('\n');
 			seed.append(Files.readString(pom, StandardCharsets.UTF_8)).append('\n');
 		}
-		try {
-			MessageDigest digest = MessageDigest.getInstance("SHA-256");
-			return HexFormat.of().formatHex(digest.digest(seed.toString().getBytes(StandardCharsets.UTF_8)));
-		} catch (NoSuchAlgorithmException missing) {
-			throw new IllegalStateException("SHA-256 unavailable", missing);
-		}
+		return Sha256.ofBytes(seed.toString().getBytes(StandardCharsets.UTF_8));
 	}
 
 	private ResolveOutcome runBuildClasspath(Path projectDir, Path module, Path out, boolean offline)
@@ -242,7 +289,17 @@ public final class MavenResolver implements DependencyResolver {
 		return joined.toString();
 	}
 
-	private static List<Path> readClasspath(Path file) throws IOException {
+	/**
+	 * Reads a classpath file. Every token must name an existing jar;
+	 * a single stale entry fails the whole file so callers re-resolve
+	 * instead of serving partial classpaths.
+	 *
+	 * @param file cache file, never null
+	 * @return existing jars, empty when the file is missing or blank
+	 * @throws IOException when a listed jar is missing or the file is unreadable
+	 */
+	static List<Path> readClasspath(Path file) throws IOException {
+		Objects.requireNonNull(file, "file");
 		if (!Files.exists(file)) {
 			return List.of();
 		}
@@ -253,9 +310,10 @@ public final class MavenResolver implements DependencyResolver {
 		List<Path> jars = new ArrayList<>();
 		for (String part : content.split(File.pathSeparator)) {
 			Path jar = Path.of(part.trim());
-			if (jar.toString().endsWith(".jar") && Files.exists(jar)) {
-				jars.add(jar);
+			if (!jar.toString().endsWith(".jar") || !Files.exists(jar)) {
+				throw new IOException("Stale cache entry: " + part.trim());
 			}
+			jars.add(jar);
 		}
 		return List.copyOf(jars);
 	}

@@ -8,12 +8,12 @@ import io.github.kxng0109.importtruth.model.Finding;
 import io.github.kxng0109.importtruth.model.FindingKind;
 import io.github.kxng0109.importtruth.model.ImportVerdict;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
+import io.github.kxng0109.importtruth.model.Packages;
 import io.github.kxng0109.importtruth.model.Symbol;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -59,32 +59,55 @@ public final class FileCheckService {
 	public CheckResult check(Path projectDir, Path file) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(file, "file");
+		List<Path> jars = resolver.resolve(projectDir, false);
+		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
+		Set<String> own = ProjectPackages.of(projectDir);
+		return checkWith(projectDir, file, dbs, own);
+	}
+
+	/**
+	 * Checks one file against already-resolved indexes.
+	 *
+	 * @param projectDir project root, never null
+	 * @param file       source file, never null
+	 * @param dbs        index files, never null
+	 * @param own        own-project packages, never null
+	 * @return the outcome, never null
+	 * @throws IOException when index reads fail
+	 */
+	public CheckResult checkWith(Path projectDir, Path file, List<Path> dbs, Set<String> own)
+			throws IOException {
+		Objects.requireNonNull(projectDir, "projectDir");
+		Objects.requireNonNull(file, "file");
+		Objects.requireNonNull(dbs, "dbs");
+		Objects.requireNonNull(own, "own");
 		ImportScan scan = JavaImports.of(file);
 		if (!scan.healthy()) {
 			return new CheckResult(false, List.of(), List.of());
 		}
-		List<Path> jars = resolver.resolve(projectDir, false);
-		List<Path> dbs = new ArrayList<>(jars.size());
-		for (Path jar : jars) {
-			dbs.add(store.ensureIndexed(jar, indexer));
-		}
-		Set<String> own = ProjectPackages.of(projectDir);
-		String display = displayName(projectDir, file);
+		String display = DisplayNames.relativizeOrFileName(projectDir, file);
+		int target = JdkTarget.of(projectDir).orElse(-1);
 		List<Finding> findings = new ArrayList<>();
 		List<ImportVerdict> verdicts = new ArrayList<>();
 		for (ImportRef ref : scan.imports()) {
-			checkImport(dbs, own, display, ref, verdicts).ifPresent(findings::add);
+			checkImport(dbs, own, display, ref, verdicts, target).ifPresent(findings::add);
 		}
 		return new CheckResult(true, findings, verdicts);
 	}
 
 	private Optional<Finding> checkImport(
-			List<Path> dbs, Set<String> own, String display, ImportRef ref, List<ImportVerdict> verdicts)
+			List<Path> dbs,
+			Set<String> own,
+			String display,
+			ImportRef ref,
+			List<ImportVerdict> verdicts,
+			int target)
 			throws IOException {
 		if (ref.wildcard()) {
-			return checkWildcard(dbs, own, display, ref, verdicts);
+			return checkWildcard(dbs, own, display, ref, verdicts, target);
 		}
-		if (!store.findAcross(dbs, ref.target()).isEmpty() || jdk.exists(ref.target())) {
+		boolean jdkHit = target >= 0 ? jdk.existsIn(ref.target(), target) : jdk.exists(ref.target());
+		if (!store.findAcross(dbs, ref.target()).isEmpty() || jdkHit) {
 			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 			return Optional.empty();
 		}
@@ -98,9 +121,14 @@ public final class FileCheckService {
 	}
 
 	private Optional<Finding> checkWildcard(
-			List<Path> dbs, Set<String> own, String display, ImportRef ref, List<ImportVerdict> verdicts)
+			List<Path> dbs,
+			Set<String> own,
+			String display,
+			ImportRef ref,
+			List<ImportVerdict> verdicts,
+			int target)
 			throws IOException {
-		if (packageExists(dbs, own, ref.target())) {
+		if (packageExists(dbs, own, ref.target(), target)) {
 			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 			return Optional.empty();
 		}
@@ -113,9 +141,10 @@ public final class FileCheckService {
 						"package " + ref.target() + " resolves nowhere", suggestion(dbs, ref.target())));
 	}
 
-	private boolean packageExists(List<Path> dbs, Set<String> own, String name) throws IOException {
+	private boolean packageExists(List<Path> dbs, Set<String> own, String name, int target)
+			throws IOException {
 		for (String pkg : own) {
-			if (pkg.equals(name) || pkg.startsWith(name + ".")) {
+			if (Packages.coveredBy(name, pkg)) {
 				return true;
 			}
 		}
@@ -124,12 +153,12 @@ public final class FileCheckService {
 				return true;
 			}
 		}
-		return jdk.packageExists(name);
+		return target >= 0 ? jdk.packageExistsIn(name, target) : jdk.packageExists(name);
 	}
 
 	private static boolean isOwnOrGenerated(Set<String> own, String name) {
 		for (String pkg : own) {
-			if (name.equals(pkg) || name.startsWith(pkg + ".")) {
+			if (Packages.contains(pkg, name)) {
 				return true;
 			}
 		}
@@ -142,27 +171,7 @@ public final class FileCheckService {
 	}
 
 	private String suggestion(List<Path> dbs, String name) throws IOException {
-		String simple = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : name;
-		Set<String> names = new LinkedHashSet<>();
-		for (Path db : dbs) {
-			for (Symbol match : store.searchIn(db, simple, 5)) {
-				names.add(match.fqn());
-				if (names.size() >= 3) {
-					break;
-				}
-			}
-			if (names.size() >= 3) {
-				break;
-			}
-		}
-		return names.isEmpty() ? "" : "maybe: " + String.join(", ", names);
-	}
-
-	private static String displayName(Path projectDir, Path file) {
-		try {
-			return projectDir.relativize(file.toAbsolutePath()).toString().replace('\\', '/');
-		} catch (IllegalArgumentException notRelative) {
-			return file.getFileName().toString();
-		}
+		List<String> ranked = Suggestions.collect(store, dbs, name, 20, 3);
+		return ranked.isEmpty() ? "" : "maybe: " + String.join(", ", ranked);
 	}
 }

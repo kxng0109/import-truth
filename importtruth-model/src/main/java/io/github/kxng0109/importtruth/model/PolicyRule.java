@@ -20,11 +20,8 @@ public record PolicyRule(PolicyRuleKind kind, String subject, String target, Str
 	 */
 	public PolicyRule {
 		Objects.requireNonNull(kind, "kind");
-		Objects.requireNonNull(subject, "subject");
+		subject = Preconditions.requireNonBlank(subject, "subject");
 		Objects.requireNonNull(target, "target");
 		Objects.requireNonNull(message, "message");
-		if (subject.isBlank()) {
-			throw new IllegalArgumentException("subject must not be blank");
-		}
 	}
 }

@@ -91,6 +91,22 @@ final class PolicyEngineTest {
 	}
 
 	@Test
+	@DisplayName("prefers with default detail when message is blank")
+	void prefersWithDefaultDetail() {
+		PolicyEngine plain = new PolicyEngine(new PolicyPack("test", List.of(
+				new PolicyRule(PolicyRuleKind.PREFER, "com.example.old", "com.example.new", ""))));
+
+		assertThat(plain.evaluate("com.example.old.Widget", true))
+				.as("default detail fires")
+				.hasValueSatisfying(hit -> {
+					assertThat(hit.detail()).as("generated detail")
+							.isEqualTo("prefer com.example.new over com.example.old");
+					assertThat(hit.suggestion()).as("rebased suggestion")
+							.isEqualTo("use com.example.new.Widget");
+				});
+	}
+
+	@Test
 	@DisplayName("rejects null targets and skips blanks")
 	@SuppressWarnings("DataFlowIssue")
 	void rejectsNullAndBlank() {

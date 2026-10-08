@@ -13,6 +13,7 @@ import io.github.kxng0109.importtruth.model.Symbol;
 import io.github.kxng0109.importtruth.model.SymbolKind;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
@@ -21,6 +22,7 @@ import java.io.PipedOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -28,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -45,6 +48,26 @@ final class FullServerE2ETest {
 	@TempDir
 	private Path project;
 
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(Path dir) throws IOException {
+		JarIndexStore created = new JarIndexStore(dir);
+		openStores.add(created);
+		return created;
+	}
+
 	@Test
 	@DisplayName("answers ping, lookup, search, and check calls")
 	@Timeout(value = 30, unit = TimeUnit.SECONDS)
@@ -57,7 +80,7 @@ final class FullServerE2ETest {
 		Path file = project.resolve("Use.java");
 		Files.write(file, "package com.other; import com.example.Widget; public class Use { Widget w; }"
 				.getBytes(StandardCharsets.UTF_8));
-		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		JarIndexStore store = openStore(state.resolve("index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
 		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
@@ -92,6 +115,14 @@ final class FullServerE2ETest {
 					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
 					+ "\",\"query\":\"Widget\"}}}");
 			assertThat(awaitLine(lines, "\"id\":5")).as("search answer").contains("com.example.Widget");
+			streams.write("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"lookup_symbols\","
+					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
+					+ "\",\"symbols\":[\"com.example.Widget\"]}}}");
+			assertThat(awaitLine(lines, "\"id\":6")).as("batch lookup answer").contains("FOUND DEFINITE");
+			streams.write("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"check_files\","
+					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
+					+ "\",\"filePaths\":[\"" + escape(file.toString()) + "\"]}}}");
+			assertThat(awaitLine(lines, "\"id\":7")).as("batch check answer").contains("clean");
 		}
 		assertThat(errors).as("reader thread errors").isEmpty();
 	}

@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -21,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -39,10 +41,30 @@ final class JarIndexStoreTest {
 	@TempDir
 	private Path jars;
 
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(String name) throws IOException {
+		JarIndexStore created = new JarIndexStore(state.resolve(name));
+		openStores.add(created);
+		return created;
+	}
+
 	@Test
 	@DisplayName("round-trips symbols and searches by substring")
 	void roundTripsAndSearches() throws Exception {
-		JarIndexStore store = new JarIndexStore(state);
+		JarIndexStore store = openStore("roundtrip");
 		FakeIndexer indexer = new FakeIndexer();
 		Path jar = fakeJar("first.jar");
 		Path db = store.ensureIndexed(jar, indexer);
@@ -74,7 +96,7 @@ final class JarIndexStoreTest {
 	@DisplayName("indexes each library once under parallel requests")
 	@Timeout(value = 30, unit = TimeUnit.SECONDS)
 	void indexesOnceUnderParallelRequests() throws Exception {
-		JarIndexStore store = new JarIndexStore(state);
+		JarIndexStore store = openStore("shared");
 		FakeIndexer indexer = new FakeIndexer();
 		Path jar = fakeJar("shared.jar");
 		int threads = 8;
@@ -108,9 +130,24 @@ final class JarIndexStoreTest {
 	}
 
 	@Test
+	@DisplayName("reindexes replaced jars")
+	void reindexesReplaced() throws Exception {
+		JarIndexStore store = openStore("swap");
+		FakeIndexer indexer = new FakeIndexer();
+		Path jar = fakeJar("swap.jar");
+
+		Path first = store.ensureIndexed(jar, indexer);
+		Files.write(jar, "different-bytes".getBytes(StandardCharsets.UTF_8));
+		Path second = store.ensureIndexed(jar, indexer);
+
+		assertThat(second).as("new content means new index").isNotEqualTo(first);
+		assertThat(indexer.runs.get()).as("indexed twice").isEqualTo(2);
+	}
+
+	@Test
 	@DisplayName("reuses existing indexes and rejects bad limits")
 	void reusesAndValidates() throws Exception {
-		JarIndexStore store = new JarIndexStore(state);
+		JarIndexStore store = openStore("reuse");
 		FakeIndexer indexer = new FakeIndexer();
 		Path jar = fakeJar("again.jar");
 
@@ -127,7 +164,7 @@ final class JarIndexStoreTest {
 	@Test
 	@DisplayName("propagates extractor failures")
 	void propagatesFailures() throws Exception {
-		JarIndexStore store = new JarIndexStore(state);
+		JarIndexStore store = openStore("broken");
 		Path jar = fakeJar("broken.jar");
 
 		assertThatThrownBy(() -> store.ensureIndexed(jar, jarFile -> {
@@ -141,7 +178,7 @@ final class JarIndexStoreTest {
 	@Test
 	@DisplayName("wraps unreadable databases")
 	void wrapsUnreadable() throws Exception {
-		JarIndexStore store = new JarIndexStore(state);
+		JarIndexStore store = openStore("unreadable");
 		Path dir = state.resolve("notadb");
 		Files.createDirectories(dir);
 
@@ -152,7 +189,7 @@ final class JarIndexStoreTest {
 	@Test
 	@DisplayName("rolls back oversized rows")
 	void rollsBackOversized() throws Exception {
-		JarIndexStore store = new JarIndexStore(state);
+		JarIndexStore store = openStore("oversized");
 		Path jar = fakeJar("wide.jar");
 		String wide = "com.example." + "W".repeat(2000);
 		LibraryIndexer indexer = jarFile -> List.of(
@@ -161,6 +198,45 @@ final class JarIndexStoreTest {
 		assertThatThrownBy(() -> store.ensureIndexed(jar, indexer))
 				.as("oversized row fails")
 				.isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("translates follower failures to IOException")
+	@Timeout(value = 30, unit = TimeUnit.SECONDS)
+	void translatesFollowerFailures() throws Exception {
+		JarIndexStore store = openStore("follower-fail");
+		Path jar = fakeJar("ff.jar");
+		CountDownLatch entered = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		LibraryIndexer broken = jarFile -> {
+			entered.countDown();
+			try {
+				if (!release.await(10, TimeUnit.SECONDS)) {
+					throw new IOException("test gate timed out");
+				}
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				throw new IOException("interrupted", interrupted);
+			}
+			throw new IOException("broken extractor");
+		};
+		ExecutorService pool = Executors.newFixedThreadPool(2);
+		try {
+			Future<Path> leader = pool.submit(() -> store.ensureIndexed(jar, broken));
+			assertThat(entered.await(10, TimeUnit.SECONDS)).as("leader entered").isTrue();
+			Future<Path> follower = pool.submit(() -> store.ensureIndexed(jar, broken));
+			Thread.sleep(200);
+			release.countDown();
+			assertThatThrownBy(() -> follower.get(10, TimeUnit.SECONDS))
+					.as("follower sees IOException")
+					.isInstanceOf(ExecutionException.class)
+					.hasMessageContaining("Indexing failed");
+			assertThatThrownBy(() -> leader.get(10, TimeUnit.SECONDS))
+					.as("leader fails too")
+					.isInstanceOf(ExecutionException.class);
+		} finally {
+			pool.shutdownNow();
+		}
 	}
 
 	@Test
@@ -181,8 +257,24 @@ final class JarIndexStoreTest {
 
 		Path staged = state.resolve("race.tmp.mv.db");
 		Files.write(staged, "new".getBytes(StandardCharsets.UTF_8));
+		byte[] winner = Files.readAllBytes(target);
 		JarIndexStore.publishTmp(staged, target);
 		assertThat(target).as("loser tolerated").exists();
+		assertThat(Files.readAllBytes(target)).as("winner content preserved").isEqualTo(winner);
+		assertThat(staged).as("loser temp consumed").doesNotExist();
+	}
+
+	@Test
+	@DisplayName("refuses queries after close")
+	void refusesAfterClose() throws Exception {
+		JarIndexStore store = openStore("closed");
+		Path db = store.ensureIndexed(fakeJar("c.jar"), new FakeIndexer());
+		assertThat(store.findIn(db, "com.example.Widget")).as("warmed reader").hasSize(1);
+		store.close();
+		openStores.remove(store);
+
+		assertThatThrownBy(() -> store.findIn(db, "com.example.Widget")).as("closed store fails")
+				.isInstanceOf(IOException.class);
 	}
 
 	@Test

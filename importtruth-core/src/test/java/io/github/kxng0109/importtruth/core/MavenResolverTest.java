@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -69,6 +70,7 @@ final class MavenResolverTest {
 					.as("contains the assertion library")
 					.isTrue();
 			assertThat(second).as("cached second run").isEqualTo(first);
+			assertThat(second).as("same memory instance").isSameAs(first);
 		} finally {
 			deleteTree(root);
 		}
@@ -131,6 +133,31 @@ final class MavenResolverTest {
 		MavenResolver resolver = new MavenResolver(state);
 
 		assertThat(resolver.resolve(bare, false)).as("empty union").isEmpty();
+	}
+
+	@Test
+	@DisplayName("reads cache files strictly")
+	void readsCacheStrictly() throws Exception {
+		Path missing = state.resolve("absent.cp");
+		Path empty = state.resolve("empty.cp");
+		Files.write(empty, new byte[0]);
+		Path jar = state.resolve("x.jar");
+		Files.write(jar, "bytes".getBytes(StandardCharsets.UTF_8));
+		Path ok = state.resolve("ok.cp");
+		Files.write(ok, jar.toString().getBytes(StandardCharsets.UTF_8));
+		Path partial = state.resolve("partial.cp");
+		Files.write(partial, (jar + File.pathSeparator + "nope.txt").getBytes(StandardCharsets.UTF_8));
+		Path gone = state.resolve("gone.cp");
+		Files.write(gone,
+				(jar + File.pathSeparator + state.resolve("missing.jar")).getBytes(StandardCharsets.UTF_8));
+
+		assertThat(MavenResolver.readClasspath(missing)).as("missing file").isEmpty();
+		assertThat(MavenResolver.readClasspath(empty)).as("blank file").isEmpty();
+		assertThat(MavenResolver.readClasspath(ok)).as("single jar").containsExactly(jar);
+		assertThatThrownBy(() -> MavenResolver.readClasspath(partial)).as("non-jar token")
+				.isInstanceOf(IOException.class);
+		assertThatThrownBy(() -> MavenResolver.readClasspath(gone)).as("missing jar")
+				.isInstanceOf(IOException.class);
 	}
 
 	@Test
@@ -228,6 +255,85 @@ final class MavenResolverTest {
 					.as("partial union refused")
 					.isInstanceOf(IOException.class)
 					.hasMessageContaining("bad");
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@Tag("slow")
+	@DisplayName("recomputes when pom stats change and heals unreadable projects")
+	void recomputesOnChange() throws Exception {
+		Path root = Files.createTempDirectory("changing");
+		try {
+			copyWrapper(root);
+			Files.write(root.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+							+ "<artifactId>changing</artifactId><version>1</version><packaging>pom</packaging>"
+							+ "<modules><module>lib</module></modules></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			Path lib = root.resolve("lib");
+			Files.createDirectories(lib);
+			Files.write(lib.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+							+ "<artifactId>changing</artifactId><version>1</version></parent>"
+							+ "<artifactId>lib</artifactId><dependencies><dependency><groupId>org.junit.jupiter</groupId>"
+							+ "<artifactId>junit-jupiter-api</artifactId><version>6.1.3</version>"
+							+ "<scope>test</scope></dependency></dependencies></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			MavenResolver resolver = new MavenResolver(state);
+
+			List<Path> first = resolver.resolve(root, false);
+			Files.write(lib.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+							+ "<artifactId>changing</artifactId><version>1</version></parent>"
+							+ "<artifactId>lib</artifactId><!-- touched -->"
+							+ "<dependencies><dependency><groupId>org.junit.jupiter</groupId>"
+							+ "<artifactId>junit-jupiter-api</artifactId><version>6.1.3</version>"
+							+ "<scope>test</scope></dependency></dependencies></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			List<Path> second = resolver.resolve(root, false);
+
+			assertThat(second).as("recomputed union matches").isEqualTo(first);
+			assertThat(second).as("recomputed instance differs").isNotSameAs(first);
+
+			deleteTree(root);
+			assertThatThrownBy(() -> resolver.resolve(root, false))
+					.as("vanished project fails loudly")
+					.isInstanceOf(IOException.class);
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@Tag("slow")
+	@DisplayName("serves disk hits to fresh resolvers")
+	void servesDiskHits() throws Exception {
+		Path root = Files.createTempDirectory("diskhit");
+		try {
+			copyWrapper(root);
+			Files.write(root.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+							+ "<artifactId>diskhit</artifactId><version>1</version><packaging>pom</packaging>"
+							+ "<modules><module>lib</module></modules></project>")
+							.getBytes(StandardCharsets.UTF_8));
+			Path lib = root.resolve("lib");
+			Files.createDirectories(lib);
+			Files.write(lib.resolve("pom.xml"),
+					("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
+							+ "<artifactId>diskhit</artifactId><version>1</version></parent>"
+							+ "<artifactId>lib</artifactId><dependencies><dependency><groupId>org.junit.jupiter</groupId>"
+							+ "<artifactId>junit-jupiter-api</artifactId><version>6.1.3</version>"
+							+ "<scope>test</scope></dependency></dependencies></project>")
+							.getBytes(StandardCharsets.UTF_8));
+
+			List<Path> first = new MavenResolver(state).resolve(root, false);
+			List<Path> second = new MavenResolver(state).resolve(root, false);
+
+			assertThat(first).as("resolved jars").isNotEmpty();
+			assertThat(second).as("disk hit matches").isEqualTo(first);
+			assertThat(second).as("disk hit is a fresh instance").isNotSameAs(first);
 		} finally {
 			deleteTree(root);
 		}

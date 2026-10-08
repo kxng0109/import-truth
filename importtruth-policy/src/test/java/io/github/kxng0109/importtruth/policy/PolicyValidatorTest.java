@@ -67,6 +67,18 @@ final class PolicyValidatorTest {
 	}
 
 	@Test
+	@DisplayName("keeps prefer rules whose source is a type")
+	void keepsPreferWithTypeSource() {
+		PolicyPack pack = packOf(
+				new PolicyRule(PolicyRuleKind.PREFER, "com.fasterxml.jackson.databind.ObjectMapper",
+						"tools.jackson.databind", ""));
+
+		assertThat(PolicyValidator.validate(pack, PACKAGES::contains, TYPES::contains))
+				.as("type source keeps rule alive")
+				.isEmpty();
+	}
+
+	@Test
 	@DisplayName("rejects bad issues")
 	void rejectsBadIssues() {
 		assertThatThrownBy(() -> new RuleIssue(" ", "reason"))

@@ -44,6 +44,23 @@ final class PingServiceTest {
 				.isInstanceOf(IllegalArgumentException.class);
 	}
 
+	@Test
+	@DisplayName("rejects blank name")
+	void rejectsBlankName() {
+		assertThatThrownBy(() -> new PingService("  ", projectVersion()))
+				.as("blank name rejection")
+				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	@DisplayName("rejects null version")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullVersion() {
+		assertThatThrownBy(() -> new PingService("importtruth", null))
+				.as("null version rejection")
+				.isInstanceOf(NullPointerException.class);
+	}
+
 	private static String projectVersion() {
 		Properties props = new Properties();
 		try (InputStream in = PingServiceTest.class.getResourceAsStream("/version.properties")) {

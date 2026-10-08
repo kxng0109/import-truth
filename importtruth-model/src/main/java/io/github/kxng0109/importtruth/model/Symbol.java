@@ -29,11 +29,8 @@ public record Symbol(
 	 * @throws IllegalArgumentException if {@code fqn} is blank
 	 */
 	public Symbol {
-		Objects.requireNonNull(fqn, "fqn");
+		fqn = Preconditions.requireNonBlank(fqn, "fqn");
 		Objects.requireNonNull(kind, "kind");
 		Objects.requireNonNull(deprecatedSince, "deprecatedSince");
-		if (fqn.isBlank()) {
-			throw new IllegalArgumentException("fqn must not be blank");
-		}
 	}
 }

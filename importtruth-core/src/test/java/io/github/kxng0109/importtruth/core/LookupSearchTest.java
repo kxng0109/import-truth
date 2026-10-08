@@ -15,10 +15,12 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -35,6 +37,26 @@ final class LookupSearchTest {
 
 	@TempDir
 	private Path project;
+
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(Path dir) throws IOException {
+		JarIndexStore created = new JarIndexStore(dir);
+		openStores.add(created);
+		return created;
+	}
 
 	@Test
 	@DisplayName("finds dependency symbols with details")
@@ -109,7 +131,7 @@ final class LookupSearchTest {
 			zip.putNextEntry(new ZipEntry("META-INF/"));
 			zip.closeEntry();
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		JarIndexStore store = openStore(state.resolve("index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
 				new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
@@ -137,7 +159,7 @@ final class LookupSearchTest {
 				zip.closeEntry();
 			}
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("split"));
+		JarIndexStore store = openStore(state.resolve("split"));
 		LibraryIndexer indexer = jarFile -> {
 			if (jarFile.equals(first)) {
 				return List.of(new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));

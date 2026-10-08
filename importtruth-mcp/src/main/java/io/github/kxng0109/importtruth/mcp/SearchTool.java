@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Searches indexed dependency names by substring.
@@ -64,12 +65,13 @@ public final class SearchTool {
 	 */
 	public McpSchema.CallToolResult call(Map<String, Object> arguments) {
 		Objects.requireNonNull(arguments, "arguments");
-		Object project = arguments.get("projectPath");
-		Object query = arguments.get("query");
-		if (!(project instanceof String projectPath) || projectPath.isBlank()
-				|| !(query instanceof String text) || text.isBlank()) {
-			return error("projectPath and query are required strings");
+		Optional<String> project = McpArgs.string(arguments, "projectPath");
+		Optional<String> query = McpArgs.string(arguments, "query");
+		if (project.isEmpty() || query.isEmpty()) {
+			return McpResults.err("projectPath and query are required strings");
 		}
+		String projectPath = project.get();
+		String text = query.get();
 		int limit = limitOf(arguments.get("limit"));
 		List<String> lines = new ArrayList<>();
 		try {
@@ -82,24 +84,15 @@ public final class SearchTool {
 				lines.add(row.toString());
 			}
 		} catch (Exception failure) {
-			return error("search failed: " + failure.getMessage());
+			return McpResults.err("search failed: " + failure);
 		}
 		if (lines.isEmpty()) {
 			lines.add("no matches for " + text);
 		}
-		McpSchema.TextContent content = McpSchema.TextContent.builder(String.join("\n", lines)).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(content), false, null, null);
-	}
-
-	private static McpSchema.CallToolResult error(String message) {
-		McpSchema.TextContent text = McpSchema.TextContent.builder(message).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), true, null, null);
+		return McpResults.ok(lines);
 	}
 
 	static int limitOf(Object raw) {
-		if (raw instanceof Number number) {
-			return Math.min(Math.max(number.intValue(), 1), MAX_LIMIT);
-		}
-		return DEFAULT_LIMIT;
+		return McpArgs.boundedLimit(raw, DEFAULT_LIMIT, MAX_LIMIT);
 	}
 }
