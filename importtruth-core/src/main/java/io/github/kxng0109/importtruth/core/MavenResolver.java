@@ -90,9 +90,14 @@ public final class MavenResolver implements DependencyResolver {
 		Set<Path> union = new LinkedHashSet<>();
 		List<String> failures = new ArrayList<>();
 		for (Path module : modulesOf(projectDir)) {
-			Path out = stateDir.resolve("resolve")
-					.resolve(hash + "." + module.getFileName() + "." + Thread.currentThread().threadId()
-							+ "." + System.nanoTime() + ".new");
+			// Maven resolves the output property against the module
+			// directory, so the scratch file is a bare filename there:
+			// spaceless, quoteless, and unique per attempt. A stale
+			// sibling from a killed run is reclaimed first.
+			sweepScratch(module);
+			String scratch = ".importtruth-" + hash + "." + Thread.currentThread().threadId()
+					+ "." + System.nanoTime() + ".cp.tmp";
+			Path out = module.resolve(scratch);
 			Files.deleteIfExists(out);
 			ResolveOutcome outcome = runBuildClasspath(projectDir, module, out, true);
 			if (!outcome.ok() && allowNetwork) {
@@ -148,6 +153,18 @@ public final class MavenResolver implements DependencyResolver {
 	private record PomStat(Path path, long modified, long size) {
 	}
 
+	private static void sweepScratch(Path module) {
+		try (Stream<Path> siblings = Files.list(module)) {
+			for (Path sibling : siblings.filter(p -> {
+				String name = p.getFileName().toString();
+				return name.startsWith(".importtruth-") && name.endsWith(".cp.tmp");
+			}).toList()) {
+				Files.deleteIfExists(sibling);
+			}
+		} catch (IOException | RuntimeException ignored) {
+			// Best effort: a leftover is overwritten or ignored below.
+		}
+	}
 	private static List<Path> modulesOf(Path projectDir) throws IOException {
 		List<Path> modules = new ArrayList<>();
 		if (Files.exists(projectDir.resolve("pom.xml"))) {
@@ -180,11 +197,13 @@ public final class MavenResolver implements DependencyResolver {
 
 	private ResolveOutcome runBuildClasspath(Path projectDir, Path module, Path out, boolean offline)
 			throws IOException {
-		List<String> command = new ArrayList<>(launcher(findWrapper(module)));
+		List<String> command = new ArrayList<>(launcher(projectDir, findWrapper(module)));
+		// The output property is a bare filename: Maven resolves it
+		// against the module directory, so it stays spaceless.
 		command.addAll(List.of(
-				"-f", module.resolve("pom.xml").toAbsolutePath().toString(),
+				"-f", argFor(projectDir, module.resolve("pom.xml")),
 				"-B", "-ntp", "-q",
-				"-Dmdep.outputFile=" + out.toAbsolutePath(),
+				"-Dmdep.outputFile=" + out.getFileName().toString(),
 				"-Dmdep.includeScope=test",
 				BUILD_CLASSPATH));
 		if (offline) {
@@ -260,18 +279,38 @@ public final class MavenResolver implements DependencyResolver {
 		return null;
 	}
 
-	private static List<String> launcher(Path wrapper) {
-		return launcher(wrapper, isWindows());
+	private static List<String> launcher(Path projectDir, Path wrapper) {
+		return launcher(projectDir, wrapper, isWindows());
 	}
 
-	static List<String> launcher(Path wrapper, boolean windows) {
+	/**
+	 * Builds the process command. Paths go in relative to the
+	 * project directory (which is also the child working directory)
+	 * so {@code cmd /d /c} never sees a spaced token it would split.
+	 * Absolute paths survive only above the project root.
+	 */
+	static List<String> launcher(Path projectDir, Path wrapper, boolean windows) {
 		if (wrapper == null) {
 			return List.of(windows ? "mvn.cmd" : "mvn");
 		}
+		String target = argFor(projectDir, wrapper.toAbsolutePath());
 		if (windows) {
-			return List.of("cmd", "/d", "/c", wrapper.toAbsolutePath().toString());
+			return List.of("cmd", "/d", "/c", target);
 		}
-		return List.of("sh", wrapper.toAbsolutePath().toString());
+		return List.of("sh", target);
+	}
+
+	/**
+	 * Renders {@code path} relative to {@code cwd} when contained,
+	 * absolute otherwise. Relative tokens need no shell quoting.
+	 */
+	static String argFor(Path cwd, Path path) {
+		Path base = cwd.toAbsolutePath().normalize();
+		Path absolute = path.toAbsolutePath().normalize();
+		if (absolute.startsWith(base)) {
+			return base.relativize(absolute).toString();
+		}
+		return absolute.toString();
 	}
 
 	private static boolean isWindows() {
