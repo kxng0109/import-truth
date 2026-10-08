@@ -59,6 +59,42 @@ public final class Suggestions {
 	}
 
 	/**
+	 * Collects case insensitive substring candidates across indexes
+	 * and ranks them.
+	 *
+	 * @param store index store, never null
+	 * @param dbs index files, never null
+	 * @param want wanted fully qualified name, never null
+	 * @param collected maximum candidates gathered, positive
+	 * @param limit maximum names returned, positive
+	 * @return best names first, never null
+	 * @throws IOException when index reads fail
+	 */
+	public static List<String> collectInsensitive(
+			JarIndexStore store, List<Path> dbs, String want, int collected, int limit) throws IOException {
+		Objects.requireNonNull(store, "store");
+		Objects.requireNonNull(dbs, "dbs");
+		Objects.requireNonNull(want, "want");
+		if (collected <= 0 || limit <= 0) {
+			throw new IllegalArgumentException("collected and limit must be positive");
+		}
+		String simple = Packages.simpleName(want);
+		Set<String> names = new LinkedHashSet<>();
+		for (Path db : dbs) {
+			for (Symbol match : store.searchInInsensitive(db, simple, collected)) {
+				names.add(match.fqn());
+				if (names.size() >= collected) {
+					break;
+				}
+			}
+			if (names.size() >= collected) {
+				break;
+			}
+		}
+		return rank(want, names, limit);
+	}
+
+	/**
 	 * Orders candidates best-first, capped to {@code limit}.
 	 *
 	 * @param want       wanted fully qualified name, never null

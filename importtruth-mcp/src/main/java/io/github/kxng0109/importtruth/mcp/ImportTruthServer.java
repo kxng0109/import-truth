@@ -12,6 +12,7 @@ import io.github.kxng0109.importtruth.core.JdkIndex;
 import io.github.kxng0109.importtruth.core.LookupService;
 import io.github.kxng0109.importtruth.core.PingService;
 import io.github.kxng0109.importtruth.core.SearchService;
+import io.github.kxng0109.importtruth.core.SuggestService;
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
 import io.github.kxng0109.importtruth.model.ApiInfo;
@@ -103,6 +104,13 @@ public final class ImportTruthServer implements AutoCloseable {
 				McpServerFeatures.SyncToolSpecification.builder()
 						.tool(checkFilesTool.definition())
 						.callHandler((exchange, request) -> checkFilesTool.call(request.arguments()))
+						.build());
+		SuggestImportsTool suggestImportsTool =
+				new SuggestImportsTool(new SuggestService(store, indexer, resolver));
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(suggestImportsTool.definition())
+						.callHandler((exchange, request) -> suggestImportsTool.call(request.arguments()))
 						.build());
 	}
 
