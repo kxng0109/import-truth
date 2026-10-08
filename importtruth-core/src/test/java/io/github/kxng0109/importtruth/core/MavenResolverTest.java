@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -132,6 +133,31 @@ final class MavenResolverTest {
 		MavenResolver resolver = new MavenResolver(state);
 
 		assertThat(resolver.resolve(bare, false)).as("empty union").isEmpty();
+	}
+
+	@Test
+	@DisplayName("reads cache files strictly")
+	void readsCacheStrictly() throws Exception {
+		Path missing = state.resolve("absent.cp");
+		Path empty = state.resolve("empty.cp");
+		Files.write(empty, new byte[0]);
+		Path jar = state.resolve("x.jar");
+		Files.write(jar, "bytes".getBytes(StandardCharsets.UTF_8));
+		Path ok = state.resolve("ok.cp");
+		Files.write(ok, jar.toString().getBytes(StandardCharsets.UTF_8));
+		Path partial = state.resolve("partial.cp");
+		Files.write(partial, (jar + File.pathSeparator + "nope.txt").getBytes(StandardCharsets.UTF_8));
+		Path gone = state.resolve("gone.cp");
+		Files.write(gone,
+				(jar + File.pathSeparator + state.resolve("missing.jar")).getBytes(StandardCharsets.UTF_8));
+
+		assertThat(MavenResolver.readClasspath(missing)).as("missing file").isEmpty();
+		assertThat(MavenResolver.readClasspath(empty)).as("blank file").isEmpty();
+		assertThat(MavenResolver.readClasspath(ok)).as("single jar").containsExactly(jar);
+		assertThatThrownBy(() -> MavenResolver.readClasspath(partial)).as("non-jar token")
+				.isInstanceOf(IOException.class);
+		assertThatThrownBy(() -> MavenResolver.readClasspath(gone)).as("missing jar")
+				.isInstanceOf(IOException.class);
 	}
 
 	@Test

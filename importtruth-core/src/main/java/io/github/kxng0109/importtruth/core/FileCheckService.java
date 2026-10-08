@@ -88,7 +88,7 @@ public final class FileCheckService {
 		if (!scan.healthy()) {
 			return new CheckResult(false, List.of(), List.of());
 		}
-		String display = displayName(projectDir, file);
+		String display = DisplayNames.relativizeOrFileName(projectDir, file);
 		List<Finding> findings = new ArrayList<>();
 		List<ImportVerdict> verdicts = new ArrayList<>();
 		for (ImportRef ref : scan.imports()) {
@@ -175,13 +175,5 @@ public final class FileCheckService {
 			}
 		}
 		return names.isEmpty() ? "" : "maybe: " + String.join(", ", names);
-	}
-
-	private static String displayName(Path projectDir, Path file) {
-		try {
-			return projectDir.relativize(file.toAbsolutePath()).toString().replace('\\', '/');
-		} catch (IllegalArgumentException notRelative) {
-			return file.getFileName().toString();
-		}
 	}
 }

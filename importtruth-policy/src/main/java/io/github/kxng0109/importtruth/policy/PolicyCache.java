@@ -38,6 +38,9 @@ public final class PolicyCache {
 		}
 		PolicyEngine fresh = new PolicyEngine(
 				new PolicyPack(pack.name(), validator.activeRules(pack)));
+		if (engines.size() >= 128) {
+			engines.clear();
+		}
 		PolicyEngine winner = engines.putIfAbsent(key, fresh);
 		return winner != null ? winner : fresh;
 	}

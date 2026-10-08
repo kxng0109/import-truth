@@ -87,7 +87,11 @@ public final class JarIndexStore implements AutoCloseable {
 		CompletableFuture<Path> future = new CompletableFuture<>();
 		CompletableFuture<Path> existing = inFlight.putIfAbsent(sha, future);
 		if (existing != null) {
-			return existing.join();
+			try {
+				return existing.join();
+			} catch (RuntimeException follower) {
+				throw new IOException("Indexing failed for " + jar, follower.getCause());
+			}
 		}
 		try {
 			List<Symbol> symbols = indexer.index(jar);

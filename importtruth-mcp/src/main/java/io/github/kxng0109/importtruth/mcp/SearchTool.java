@@ -82,7 +82,7 @@ public final class SearchTool {
 				lines.add(row.toString());
 			}
 		} catch (Exception failure) {
-			return error("search failed: " + failure.getMessage());
+			return error("search failed: " + failure);
 		}
 		if (lines.isEmpty()) {
 			lines.add("no matches for " + text);

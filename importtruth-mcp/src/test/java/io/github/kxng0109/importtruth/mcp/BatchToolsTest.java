@@ -165,6 +165,10 @@ final class BatchToolsTest {
 				Map.of("projectPath", project.toString(), "filePaths", List.of(" ", 42)))))
 				.as("all-invalid batch stays successful")
 				.contains("ERROR file path must be a non-blank string");
+		assertThat(textOf(check.call(
+				Map.of("projectPath", project.toString(), "filePaths", List.of("a\0b")))))
+				.as("illegal path isolated")
+				.contains("ERROR invalid file path");
 		List<String> tooManyFiles = new ArrayList<>();
 		for (int i = 0; i <= CheckFilesTool.MAX_FILES; i++) {
 			tooManyFiles.add("File" + i + ".java");

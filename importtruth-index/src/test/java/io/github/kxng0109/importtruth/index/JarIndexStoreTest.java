@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -197,6 +198,45 @@ final class JarIndexStoreTest {
 		assertThatThrownBy(() -> store.ensureIndexed(jar, indexer))
 				.as("oversized row fails")
 				.isInstanceOf(IOException.class);
+	}
+
+	@Test
+	@DisplayName("translates follower failures to IOException")
+	@Timeout(value = 30, unit = TimeUnit.SECONDS)
+	void translatesFollowerFailures() throws Exception {
+		JarIndexStore store = openStore("follower-fail");
+		Path jar = fakeJar("ff.jar");
+		CountDownLatch entered = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		LibraryIndexer broken = jarFile -> {
+			entered.countDown();
+			try {
+				if (!release.await(10, TimeUnit.SECONDS)) {
+					throw new IOException("test gate timed out");
+				}
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				throw new IOException("interrupted", interrupted);
+			}
+			throw new IOException("broken extractor");
+		};
+		ExecutorService pool = Executors.newFixedThreadPool(2);
+		try {
+			Future<Path> leader = pool.submit(() -> store.ensureIndexed(jar, broken));
+			assertThat(entered.await(10, TimeUnit.SECONDS)).as("leader entered").isTrue();
+			Future<Path> follower = pool.submit(() -> store.ensureIndexed(jar, broken));
+			Thread.sleep(200);
+			release.countDown();
+			assertThatThrownBy(() -> follower.get(10, TimeUnit.SECONDS))
+					.as("follower sees IOException")
+					.isInstanceOf(ExecutionException.class)
+					.hasMessageContaining("Indexing failed");
+			assertThatThrownBy(() -> leader.get(10, TimeUnit.SECONDS))
+					.as("leader fails too")
+					.isInstanceOf(ExecutionException.class);
+		} finally {
+			pool.shutdownNow();
+		}
 	}
 
 	@Test

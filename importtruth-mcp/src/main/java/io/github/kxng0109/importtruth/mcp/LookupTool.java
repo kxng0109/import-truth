@@ -71,7 +71,7 @@ public final class LookupTool {
 		try {
 			answer = lookup.lookup(Paths.get(projectPath), name);
 		} catch (Exception failure) {
-			return error("lookup failed: " + failure.getMessage());
+			return error("lookup failed: " + failure);
 		}
 		List<String> lines = new ArrayList<>();
 		if (!answer.found()) {

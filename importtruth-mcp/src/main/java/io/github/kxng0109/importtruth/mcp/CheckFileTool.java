@@ -1,6 +1,7 @@
 package io.github.kxng0109.importtruth.mcp;
 
 import io.github.kxng0109.importtruth.core.DependencyResolver;
+import io.github.kxng0109.importtruth.core.DisplayNames;
 import io.github.kxng0109.importtruth.core.FileCheckService;
 import io.github.kxng0109.importtruth.core.JdkIndex;
 import io.github.kxng0109.importtruth.core.ProjectPackages;
@@ -108,7 +109,7 @@ public final class CheckFileTool {
 			McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
 			return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
 		} catch (Exception failure) {
-			return error("check failed: " + failure.getMessage());
+			return error("check failed: " + failure);
 		}
 	}
 
@@ -150,17 +151,20 @@ public final class CheckFileTool {
 			Set<String> own)
 			throws IOException {
 		CheckResult result = check.checkWith(projectDir, file, dbs, own);
+		if (!result.healthy()) {
+			return List.of("ERROR " + DisplayNames.relativizeOrFileName(projectDir, file)
+					+ ": file could not be parsed");
+		}
 		List<Finding> findings = new ArrayList<>(result.findings());
-		if (result.healthy()) {
-			for (ImportVerdict verdict : result.verdicts()) {
-				if (!verdict.resolved()) {
-					continue;
-				}
-				Optional<PolicyHit> hit = policy.evaluate(verdict.target(), true);
-				if (hit.isPresent()) {
-					findings.add(new Finding(display(projectDir, file), (int) verdict.line(),
-							FindingKind.POLICY, hit.get().detail(), hit.get().suggestion()));
-				}
+		for (ImportVerdict verdict : result.verdicts()) {
+			if (!verdict.resolved()) {
+				continue;
+			}
+			Optional<PolicyHit> hit = policy.evaluate(verdict.target(), true);
+			if (hit.isPresent()) {
+				findings.add(new Finding(
+						DisplayNames.relativizeOrFileName(projectDir, file), (int) verdict.line(),
+						FindingKind.POLICY, hit.get().detail(), hit.get().suggestion()));
 			}
 		}
 		List<String> lines = new ArrayList<>(findings.size());
@@ -240,14 +244,6 @@ public final class CheckFileTool {
 			return false;
 		}
 		return jdk.packageExists(name);
-	}
-
-	private static String display(Path projectDir, Path file) {
-		try {
-			return projectDir.relativize(file.toAbsolutePath()).toString().replace('\\', '/');
-		} catch (IllegalArgumentException notRelative) {
-			return file.getFileName().toString();
-		}
 	}
 
 	private static McpSchema.CallToolResult error(String message) {

@@ -6,6 +6,7 @@ import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
 import io.modelcontextprotocol.spec.McpSchema;
 
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -100,7 +101,11 @@ public final class CheckFilesTool {
 				lines.add("ERROR file path must be a non-blank string");
 				continue;
 			}
-			valid.add(Paths.get(filePath));
+			try {
+				valid.add(Paths.get(filePath));
+			} catch (InvalidPathException invalid) {
+				lines.add("ERROR invalid file path: " + filePath);
+			}
 		}
 		if (valid.isEmpty()) {
 			McpSchema.TextContent onlyErrors =
@@ -119,7 +124,7 @@ public final class CheckFilesTool {
 			McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
 			return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
 		} catch (Exception failure) {
-			return error("check failed: " + failure.getMessage());
+			return error("check failed: " + failure);
 		}
 	}
 

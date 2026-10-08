@@ -147,15 +147,16 @@ final class CheckFileToolTest {
 				.contains("POLICY");
 	}
 	@Test
-	@DisplayName("reports broken files clean and resolver failures as errors")
+	@DisplayName("reports broken files as errors and resolver failures as errors")
 	void reportsUnhealthyAndFailures() throws Exception {
 		CheckFileTool tool = tool();
 		Path broken = file("Broken.java",
 				"package com.other; import java.util.List; public class Broken { void x( { } }");
 
 		assertThat(textOf(tool.call(Map.of("projectPath", project.toString(), "filePath", broken.toString()))))
-				.as("unhealthy file clean")
-				.isEqualTo("clean");
+				.as("unhealthy file flagged")
+				.startsWith("ERROR ")
+				.contains("Broken.java");
 
 		CheckFileTool failing = failingTool();
 		Path missing = file("Missing.java",

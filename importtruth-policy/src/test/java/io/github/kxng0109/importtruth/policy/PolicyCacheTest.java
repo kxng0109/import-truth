@@ -46,4 +46,26 @@ final class PolicyCacheTest {
 		assertThatThrownBy(() -> cache.engine(pack, "jars-1", null)).as("null validator")
 				.isInstanceOf(NullPointerException.class);
 	}
+
+	@Test
+	@DisplayName("evicts when full")
+	void evictsWhenFull() {
+		PolicyCache cache = new PolicyCache();
+		AtomicInteger validations = new AtomicInteger();
+		PolicyCache.Validator validator = pack -> {
+			validations.incrementAndGet();
+			return List.copyOf(pack.rules());
+		};
+		PolicyPack pack = new PolicyPack("test", List.of(
+				new PolicyRule(PolicyRuleKind.ALLOW, "com.example.keep", "", "")));
+
+		for (int i = 0; i < 130; i++) {
+			cache.engine(pack, "jars-" + i, validator);
+		}
+
+		assertThat(validations.get()).as("every key validated").isEqualTo(130);
+		cache.engine(pack, "jars-0", validator);
+
+		assertThat(validations.get()).as("evicted key revalidated").isEqualTo(131);
+	}
 }
