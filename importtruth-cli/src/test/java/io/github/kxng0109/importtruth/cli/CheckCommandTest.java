@@ -15,11 +15,13 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.util.stream.Stream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
@@ -76,30 +78,52 @@ final class CheckCommandTest {
 	void goldenChecks() throws Exception {
 		Path project = Paths.get(System.getProperty("user.dir")).getParent();
 		CheckCommand command = command();
-		Path clean = file("Clean.java",
-				"package com.example; import java.util.List; import tools.jackson.databind.ObjectMapper;"
-						+ " public class Clean { List<ObjectMapper> items; }");
-		Path missing = file("Missing.java",
-				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
-		Path legacy = file("Legacy.java",
-				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
-						+ " public class Legacy { ObjectMapper mapper; }");
+		// Fixtures live inside the checked project: checks reject
+		// outside files by contract. Scratch dir is gitignored.
+		Path scratch = project.resolve(".tmp").resolve("golden-checks");
+		Files.createDirectories(scratch);
+		try {
+			Path clean = scratchFile(scratch, "Clean.java",
+					"package com.example; import java.util.List; import tools.jackson.databind.ObjectMapper;"
+							+ " public class Clean { List<ObjectMapper> items; }");
+			Path missing = scratchFile(scratch, "Missing.java",
+					"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+			Path legacy = scratchFile(scratch, "Legacy.java",
+					"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+							+ " public class Legacy { ObjectMapper mapper; }");
 
-		assertThat(run(command, project, clean)).as("clean exit").isEqualTo(0);
+			assertThat(run(command, project, clean)).as("clean exit").isEqualTo(0);
 
-		ByteArrayOutputStream missingOut = new ByteArrayOutputStream();
-		int missingExit = command.run(new PrintStream(missingOut, true, StandardCharsets.UTF_8),
-				System.err, project, missing);
-		assertThat(missingExit).as("missing exit").isEqualTo(1);
-		assertThat(missingOut.toString(StandardCharsets.UTF_8)).as("missing line")
-				.contains("MISSING").contains("org.example.Nope");
+			ByteArrayOutputStream missingOut = new ByteArrayOutputStream();
+			int missingExit = command.run(new PrintStream(missingOut, true, StandardCharsets.UTF_8),
+					System.err, project, missing);
+			assertThat(missingExit).as("missing exit").isEqualTo(1);
+			assertThat(missingOut.toString(StandardCharsets.UTF_8)).as("missing line")
+					.contains("MISSING").contains("org.example.Nope");
 
-		ByteArrayOutputStream legacyOut = new ByteArrayOutputStream();
-		int legacyExit = command.run(new PrintStream(legacyOut, true, StandardCharsets.UTF_8),
-				System.err, project, legacy);
-		assertThat(legacyExit).as("policy exit stays zero").isEqualTo(0);
-		assertThat(legacyOut.toString(StandardCharsets.UTF_8)).as("policy line")
-				.contains("POLICY").contains("tools.jackson.databind.ObjectMapper");
+			ByteArrayOutputStream legacyOut = new ByteArrayOutputStream();
+			int legacyExit = command.run(new PrintStream(legacyOut, true, StandardCharsets.UTF_8),
+					System.err, project, legacy);
+			assertThat(legacyExit).as("policy exit stays zero").isEqualTo(0);
+			assertThat(legacyOut.toString(StandardCharsets.UTF_8)).as("policy line")
+					.contains("POLICY").contains("tools.jackson.databind.ObjectMapper");
+		} finally {
+			deleteTree(scratch);
+		}
+	}
+
+	private static Path scratchFile(Path dir, String name, String content) throws Exception {
+		Path file = dir.resolve(name);
+		Files.write(file, content.getBytes(StandardCharsets.UTF_8));
+		return file;
+	}
+
+	private static void deleteTree(Path root) throws IOException {
+		try (Stream<Path> walk = Files.walk(root)) {
+			for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+				Files.deleteIfExists(path);
+			}
+		}
 	}
 
 	private int run(CheckCommand command, Path project, Path file) throws Exception {
@@ -256,19 +280,19 @@ final class CheckCommandTest {
 	}
 
 	@Test
-	@DisplayName("falls back to file names outside the project")
-	void fallsBackOutsideProject() throws Exception {		CheckCommand command = fakeCommand();
+	@DisplayName("rejects files outside the project")
+	void rejectsOutsideProject() throws Exception {
+		CheckCommand command = fakeCommand();
 		Path legacy = file("Legacy.java",
 				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
 						+ " public class Legacy { ObjectMapper mapper; }");
 		ByteArrayOutputStream out = new ByteArrayOutputStream();
 
-		int exit = command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err,
-				Paths.get("rel-proj"), legacy.toAbsolutePath());
-
-		assertThat(exit).as("policy exit stays zero").isEqualTo(0);
-		assertThat(out.toString(StandardCharsets.UTF_8)).as("bare file name fallback")
-				.contains("Legacy.java:");
+		assertThatThrownBy(() -> command.run(new PrintStream(out, true, StandardCharsets.UTF_8), System.err,
+				Paths.get("rel-proj"), legacy.toAbsolutePath()))
+				.as("outside file rejected")
+				.isInstanceOf(IOException.class)
+				.hasMessageContaining("outside the project");
 	}
 
 	private CheckCommand fakeCommand() throws Exception {

@@ -1,6 +1,7 @@
 package io.github.kxng0109.importtruth.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.CheckResult;
@@ -177,20 +178,18 @@ final class FileCheckServiceTest {
 	}
 
 	@Test
-	@DisplayName("falls back to file names outside the project")
-	void fallsBackOutsideProject() throws Exception {
+	@DisplayName("rejects files outside the project")
+	void rejectsOutsideProject() throws Exception {
 		FileCheckService check = service();
 		Path outside = Files.createTempFile("Elsewhere", ".java");
 		try {
 			Files.write(outside,
 					"import org.example.Nope; public class Elsewhere { Nope n; }".getBytes(StandardCharsets.UTF_8));
 
-			CheckResult result = check.check(Paths.get("."), outside);
-
-			assertThat(result.healthy()).as("healthy file").isTrue();
-			assertThat(result.findings()).as("one finding").hasSize(1);
-			assertThat(result.findings().get(0).file()).as("file name fallback")
-					.isEqualTo(outside.getFileName().toString());
+			assertThatThrownBy(() -> check.check(Paths.get("."), outside))
+					.as("outside file rejected")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("outside the project");
 		} finally {
 			Files.deleteIfExists(outside);
 		}

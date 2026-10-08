@@ -8,9 +8,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,6 +31,12 @@ import java.util.stream.Stream;
  * never collapse to one arbitrary module.
  */
 public final class MavenResolver implements DependencyResolver {
+
+	/**
+	 * Maximum pom-search depth. Module trees deeper than this are
+	 * pathological; the crawl stops instead of trapping the server.
+	 */
+	static final int MAX_POM_DEPTH = 8;
 
 	/**
 	 * Fully qualified goal: short prefixes fail on machines without a warm
@@ -184,9 +193,24 @@ public final class MavenResolver implements DependencyResolver {
 
 	private String hashPoms(Path projectDir) throws IOException {
 		List<Path> poms = new ArrayList<>();
-		try (Stream<Path> walk = Files.walk(projectDir)) {
-			walk.filter(p -> p.getFileName().toString().equals("pom.xml")).sorted().forEach(poms::add);
-		}
+		// Bounded crawl: deep or restricted trees (system directories,
+		// runaway mounts) must never trap resolution. Denied subtrees
+		// are skipped, depth is capped, links are not followed.
+		Files.walkFileTree(projectDir, Set.of(), MAX_POM_DEPTH, new SimpleFileVisitor<>() {
+			@Override
+			public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+				if (file.getFileName().toString().equals("pom.xml")) {
+					poms.add(file);
+				}
+				return FileVisitResult.CONTINUE;
+			}
+
+			@Override
+			public FileVisitResult visitFileFailed(Path file, IOException exc) {
+				return FileVisitResult.SKIP_SUBTREE;
+			}
+		});
+		poms.sort(null);
 		StringBuilder seed = new StringBuilder();
 		for (Path pom : poms) {
 			seed.append(projectDir.relativize(pom)).append('\n');

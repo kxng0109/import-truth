@@ -37,6 +37,12 @@ final class McpArgsTest {
 	}
 
 	@Test
+	@DisplayName("rejects multi-line values")
+	void rejectsMultiline() {
+		assertThat(McpArgs.string(Map.of("name", "a.B\norg.C"), "name")).as("newline").isEmpty();
+		assertThat(McpArgs.string(Map.of("name", "a.B\rorg.C"), "name")).as("carriage return").isEmpty();
+	}
+	@Test
 	@DisplayName("clamps limits into range")
 	void clampsLimits() {
 		assertThat(McpArgs.boundedLimit(99, 5, 25)).as("clamped high").isEqualTo(25);

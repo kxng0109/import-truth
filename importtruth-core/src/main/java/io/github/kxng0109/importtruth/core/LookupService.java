@@ -49,17 +49,49 @@ public final class LookupService {
 	public LookupResult lookup(Path projectDir, String symbol) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(symbol, "symbol");
+		String name = plainSymbol(symbol);
+		if (name.isBlank()) {
+			return new LookupResult(false, Confidence.CANDIDATE, List.of(), List.of(), false);
+		}
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
-		List<Symbol> matches = store.findAcross(dbs, symbol);
+		List<Symbol> matches = store.findAcross(dbs, name);
 		if (!matches.isEmpty()) {
 			return new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false);
 		}
 		int target = JdkTarget.of(projectDir).orElse(-1);
-		if (target >= 0 ? jdk.existsIn(symbol, target) : jdk.exists(symbol)) {
+		if (target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name)) {
 			return new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true);
 		}
-		return new LookupResult(false, Confidence.CANDIDATE, List.of(), suggestions(dbs, symbol), false);
+		return new LookupResult(false, Confidence.CANDIDATE, List.of(), suggestions(dbs, name), false);
+	}
+
+	/**
+	 * Strips type arguments and array suffixes so lookups accept
+	 * source spellings like {@code Map<String, List<String>>}.
+	 *
+	 * @param symbol raw symbol, never null
+	 * @return plain name, never null
+	 */
+	static String plainSymbol(String symbol) {
+		String compact = symbol.replaceAll("\\s+", "");
+		StringBuilder kept = new StringBuilder();
+		int depth = 0;
+		for (int i = 0; i < compact.length(); i++) {
+			char current = compact.charAt(i);
+			if (current == '<') {
+				depth++;
+			} else if (current == '>') {
+				depth = Math.max(0, depth - 1);
+			} else if (depth == 0) {
+				kept.append(current);
+			}
+		}
+		String plain = kept.toString();
+		while (plain.endsWith("[]")) {
+			plain = plain.substring(0, plain.length() - 2);
+		}
+		return plain;
 	}
 
 	private List<String> suggestions(List<Path> dbs, String symbol) throws IOException {

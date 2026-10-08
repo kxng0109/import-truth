@@ -212,16 +212,19 @@ final class CheckFileToolTest {
 	}
 
 	@Test
-	@DisplayName("falls back to file names outside the project")
-	void fallsBackOutsideProject() throws Exception {
+	@DisplayName("rejects files outside the project")
+	void rejectsOutsideProject() throws Exception {
 		Path legacy = file("Legacy.java",
 				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
 						+ " public class Legacy { ObjectMapper mapper; }");
 
-		String line = textOf(tool().call(
-				Map.of("projectPath", "rel-proj", "filePath", legacy.toAbsolutePath().toString())));
+		CallToolResult result = tool().call(
+				Map.of("projectPath", "rel-proj", "filePath", legacy.toAbsolutePath().toString()));
 
-		assertThat(line).as("bare file name fallback").startsWith("Legacy.java:");
+		assertThat(result.isError()).as("outside file flagged").isTrue();
+		assertThat(((TextContent) result.content().get(0)).text())
+				.as("names the violation")
+				.contains("outside the project");
 	}
 
 	private CheckFileTool tool() {

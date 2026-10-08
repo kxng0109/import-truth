@@ -59,6 +59,7 @@ public final class FileCheckService {
 	public CheckResult check(Path projectDir, Path file) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(file, "file");
+		requireInside(projectDir, file);
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
 		Set<String> own = ProjectPackages.of(projectDir);
@@ -81,6 +82,7 @@ public final class FileCheckService {
 		Objects.requireNonNull(file, "file");
 		Objects.requireNonNull(dbs, "dbs");
 		Objects.requireNonNull(own, "own");
+		requireInside(projectDir, file);
 		ImportScan scan = JavaImports.of(file);
 		if (!scan.healthy()) {
 			return new CheckResult(false, List.of(), List.of());
@@ -154,6 +156,13 @@ public final class FileCheckService {
 			}
 		}
 		return target >= 0 ? jdk.packageExistsIn(name, target) : jdk.packageExists(name);
+	}
+
+	private static void requireInside(Path projectDir, Path file) throws IOException {
+		Path root = projectDir.toAbsolutePath().normalize();
+		if (!file.toAbsolutePath().normalize().startsWith(root)) {
+			throw new IOException("File is outside the project: " + file);
+		}
 	}
 
 	private static boolean isOwnOrGenerated(Set<String> own, String name) {

@@ -97,6 +97,20 @@ final class LookupSearchTest {
 	}
 
 	@Test
+	@DisplayName("strips generics and arrays from lookups")
+	void stripsGenericsAndArrays() throws Exception {
+		Services services = services();
+
+		LookupResult generic = services.lookup().lookup(project, "com.example.Widget<String>");
+
+		assertThat(generic.found()).as("generic spelling resolves").isTrue();
+		assertThat(LookupService.plainSymbol("java.util.Map<String, List<String>>[]"))
+				.as("nested generics plus array")
+				.isEqualTo("java.util.Map");
+		assertThat(LookupService.plainSymbol("<T>")).as("bare type variable").isEmpty();
+	}
+
+	@Test
 	@DisplayName("suggests across indexes without dots")
 	void suggestsAcrossIndexes() throws Exception {
 		Services services = twoJarServices();
