@@ -72,9 +72,14 @@ public final class JdkIndex {
 	}
 
 	private boolean contains(String member) {
+		return anyModule(member, false);
+	}
+
+	private boolean anyModule(String member, boolean directoriesOnly) {
 		for (Path module : modules) {
 			try {
-				if (Files.exists(module.resolve(member))) {
+				Path resolved = module.resolve(member);
+				if (directoriesOnly ? Files.isDirectory(resolved) : Files.exists(resolved)) {
 					return true;
 				}
 			} catch (Exception missing) {
@@ -97,16 +102,6 @@ public final class JdkIndex {
 	}
 
 	private boolean probePackage(String name) {
-		String path = name.replace('.', '/');
-		for (Path module : modules) {
-			try {
-				if (Files.isDirectory(module.resolve(path))) {
-					return true;
-				}
-			} catch (Exception missing) {
-				// Unreadable module: treated as absent, like a missing entry.
-			}
-		}
-		return false;
+		return anyModule(name.replace('.', '/'), true);
 	}
 }

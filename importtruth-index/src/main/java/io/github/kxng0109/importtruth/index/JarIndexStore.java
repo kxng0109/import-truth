@@ -55,7 +55,7 @@ public final class JarIndexStore implements AutoCloseable {
 	 */
 	private String shaOf(Path jar) throws IOException {
 		Path key = jar.toAbsolutePath().normalize();
-		String stamp = Files.getLastModifiedTime(jar).toMillis() + ":" + Files.size(jar);
+		String stamp = JarStamp.key(jar);
 		ShaEntry remembered = shas.get(key);
 		if (remembered != null && remembered.stamp().equals(stamp)) {
 			return remembered.sha();
@@ -122,16 +122,7 @@ public final class JarIndexStore implements AutoCloseable {
 		Objects.requireNonNull(fqn, "fqn");
 		String sql = "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
 				+ " FROM symbols WHERE fqn = ? ORDER BY fqn";
-		synchronized (this) {
-			try (PreparedStatement query = readerFor(db).prepareStatement(sql)) {
-				query.setString(1, fqn);
-				try (ResultSet rows = query.executeQuery()) {
-					return readAll(rows);
-				}
-			} catch (SQLException failure) {
-				throw new IOException("Query failed on " + db, failure);
-			}
-		}
+		return queryList(db, sql, "Query failed on ", statement -> statement.setString(1, fqn));
 	}
 
 	/**
@@ -169,17 +160,29 @@ public final class JarIndexStore implements AutoCloseable {
 		}
 		String sql = "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
 				+ " FROM symbols WHERE fqn LIKE ? ESCAPE '\\' ORDER BY LENGTH(fqn), fqn LIMIT ?";
+		return queryList(db, sql, "Search failed on ", statement -> {
+			statement.setString(1, "%" + escapeLike(query) + "%");
+			statement.setInt(2, limit);
+		});
+	}
+
+	private List<Symbol> queryList(Path db, String sql, String failurePrefix, Binder binder)
+			throws IOException {
 		synchronized (this) {
 			try (PreparedStatement statement = readerFor(db).prepareStatement(sql)) {
-				statement.setString(1, "%" + escapeLike(query) + "%");
-				statement.setInt(2, limit);
+				binder.bind(statement);
 				try (ResultSet rows = statement.executeQuery()) {
 					return readAll(rows);
 				}
 			} catch (SQLException failure) {
-				throw new IOException("Search failed on " + db, failure);
+				throw new IOException(failurePrefix + db, failure);
 			}
 		}
+	}
+
+	private interface Binder {
+
+		void bind(PreparedStatement statement) throws SQLException;
 	}
 
 	private Path dbFile(String sha) {

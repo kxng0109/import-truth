@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Answers many symbols in one call. Each item keeps the exact lines
@@ -68,17 +69,19 @@ public final class LookupSymbolsTool {
 	 */
 	public McpSchema.CallToolResult call(Map<String, Object> arguments) {
 		Objects.requireNonNull(arguments, "arguments");
-		Object project = arguments.get("projectPath");
-		Object raw = arguments.get("symbols");
-		if (!(project instanceof String projectPath) || projectPath.isBlank()) {
-			return error("projectPath is a required string");
+		Optional<String> project = McpArgs.string(arguments, "projectPath");
+		Optional<List<?>> raw = McpArgs.strings(arguments, "symbols");
+		if (project.isEmpty()) {
+			return McpResults.err("projectPath is a required string");
 		}
-		if (!(raw instanceof List<?> symbols) || symbols.isEmpty()) {
-			return error("symbols is a required non-empty array");
+		if (raw.isEmpty()) {
+			return McpResults.err("symbols is a required non-empty array");
 		}
+		List<?> symbols = raw.get();
 		if (symbols.size() > MAX_SYMBOLS) {
-			return error("at most " + MAX_SYMBOLS + " symbols per call");
+			return McpResults.err("at most " + MAX_SYMBOLS + " symbols per call");
 		}
+		String projectPath = project.get();
 		List<String> lines = new ArrayList<>();
 		for (Object item : symbols) {
 			if (!(item instanceof String name) || name.isBlank()) {
@@ -87,19 +90,14 @@ public final class LookupSymbolsTool {
 			}
 			McpSchema.CallToolResult single =
 					lookup.call(Map.of("projectPath", projectPath, "symbol", name));
-			String text = ((McpSchema.TextContent) single.content().get(0)).text();
+			Object payload = single.content().isEmpty() ? null : single.content().get(0);
+			String text = payload instanceof McpSchema.TextContent typed ? typed.text() : "<unrenderable>";
 			if (single.isError()) {
 				lines.add("ERROR " + name + ": " + text);
 			} else {
 				lines.addAll(List.of(text.split("\n")));
 			}
 		}
-		McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
-	}
-
-	private static McpSchema.CallToolResult error(String message) {
-		McpSchema.TextContent text = McpSchema.TextContent.builder(message).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), true, null, null);
+		return McpResults.ok(lines);
 	}
 }

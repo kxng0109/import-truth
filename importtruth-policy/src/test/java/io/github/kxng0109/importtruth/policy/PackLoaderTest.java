@@ -10,6 +10,10 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -79,6 +83,40 @@ final class PackLoaderTest {
 
 		assertThat(pack.rules()).as("one allow rule").hasSize(1);
 		assertThat(pack.rules().get(0).kind()).as("allow kind").isEqualTo(PolicyRuleKind.ALLOW);
+	}
+
+	@Test
+	@DisplayName("reads project packs with override or default")
+	@SuppressWarnings("DataFlowIssue")
+	void readsProjectPacks() throws Exception {
+		Path dir = Files.createTempDirectory("packs");
+		try {
+			PolicyPack fallback = PackLoader.loadProjectPack(PackLoaderTest.class, dir);
+
+			assertThat(fallback.name()).as("default pack").isEqualTo("jackson3");
+
+			Files.write(dir.resolve(".importtruth.yml"),
+					"allow:\n  - package: com.example.keep\n".getBytes(StandardCharsets.UTF_8));
+			PolicyPack override = PackLoader.loadProjectPack(PackLoaderTest.class, dir);
+
+			assertThat(override.name()).as("override pack").isEqualTo("project");
+			assertThat(override.rules()).as("one allow rule").hasSize(1);
+			assertThatThrownBy(() -> PackLoader.loadProjectPack(null, dir)).as("null anchor")
+					.isInstanceOf(NullPointerException.class);
+			assertThatThrownBy(() -> PackLoader.loadProjectPack(PackLoaderTest.class, null))
+					.as("null project")
+					.isInstanceOf(NullPointerException.class);
+		} finally {
+			deleteTree(dir);
+		}
+	}
+
+	private static void deleteTree(Path root) throws IOException {
+		try (Stream<Path> walk = Files.walk(root)) {
+			for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+				Files.deleteIfExists(path);
+			}
+		}
 	}
 
 	private static InputStream bytes(String text) {

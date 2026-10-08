@@ -40,23 +40,20 @@ public final class ProjectPackages {
 	}
 
 	private static void collectSources(Path root, Set<String> packages) throws IOException {
-		if (!Files.isDirectory(root)) {
-			return;
-		}
-		try (Stream<Path> walk = Files.walk(root)) {
-			walk.filter(p -> p.toString().endsWith(".java"))
-					.map(p -> root.relativize(p.getParent()))
-					.map(ProjectPackages::dotted)
-					.forEach(packages::add);
-		}
+		collectByExtension(root, packages, ".java");
 	}
 
 	private static void collectClasses(Path root, Set<String> packages) throws IOException {
+		collectByExtension(root, packages, ".class");
+	}
+
+	private static void collectByExtension(Path root, Set<String> packages, String extension)
+			throws IOException {
 		if (!Files.isDirectory(root)) {
 			return;
 		}
 		try (Stream<Path> walk = Files.walk(root)) {
-			walk.filter(p -> p.toString().endsWith(".class"))
+			walk.filter(p -> p.toString().endsWith(extension))
 					.map(p -> root.relativize(p.getParent()))
 					.map(ProjectPackages::dotted)
 					.forEach(packages::add);

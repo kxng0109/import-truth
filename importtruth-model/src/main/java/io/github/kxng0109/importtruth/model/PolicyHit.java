@@ -17,10 +17,7 @@ public record PolicyHit(String detail, String suggestion) {
 	 * @throws IllegalArgumentException if {@code detail} is blank
 	 */
 	public PolicyHit {
-		Objects.requireNonNull(detail, "detail");
+		detail = Preconditions.requireNonBlank(detail, "detail");
 		Objects.requireNonNull(suggestion, "suggestion");
-		if (detail.isBlank()) {
-			throw new IllegalArgumentException("detail must not be blank");
-		}
 	}
 }

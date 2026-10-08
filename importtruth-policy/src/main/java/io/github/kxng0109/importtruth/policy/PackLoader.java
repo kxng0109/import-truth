@@ -7,6 +7,8 @@ import io.github.kxng0109.importtruth.model.PolicyRuleKind;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +27,28 @@ public final class PackLoader {
 	static final int MAX_BYTES = 1024 * 1024;
 
 	private PackLoader() {
+	}
+
+	/**
+	 * Reads the project override pack or the bundled default.
+	 *
+	 * @param anchor     class for default-pack resource lookup, never null
+	 * @param projectDir project root, never null
+	 * @return the pack, never null
+	 * @throws IOException when the pack cannot be read
+	 */
+	public static PolicyPack loadProjectPack(Class<?> anchor, Path projectDir) throws IOException {
+		Objects.requireNonNull(anchor, "anchor");
+		Objects.requireNonNull(projectDir, "projectDir");
+		Path override = projectDir.resolve(".importtruth.yml");
+		if (Files.exists(override)) {
+			try (InputStream in = Files.newInputStream(override)) {
+				return PackLoader.load("project", in);
+			}
+		}
+		try (InputStream in = anchor.getResourceAsStream("/packs/jackson3.yaml")) {
+			return PackLoader.load("jackson3", in);
+		}
 	}
 
 	/**

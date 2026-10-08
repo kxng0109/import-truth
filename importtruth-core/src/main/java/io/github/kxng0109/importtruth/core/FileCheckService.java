@@ -8,12 +8,12 @@ import io.github.kxng0109.importtruth.model.Finding;
 import io.github.kxng0109.importtruth.model.FindingKind;
 import io.github.kxng0109.importtruth.model.ImportVerdict;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
+import io.github.kxng0109.importtruth.model.Packages;
 import io.github.kxng0109.importtruth.model.Symbol;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -60,10 +60,7 @@ public final class FileCheckService {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(file, "file");
 		List<Path> jars = resolver.resolve(projectDir, false);
-		List<Path> dbs = new ArrayList<>(jars.size());
-		for (Path jar : jars) {
-			dbs.add(store.ensureIndexed(jar, indexer));
-		}
+		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
 		Set<String> own = ProjectPackages.of(projectDir);
 		return checkWith(projectDir, file, dbs, own);
 	}
@@ -134,7 +131,7 @@ public final class FileCheckService {
 
 	private boolean packageExists(List<Path> dbs, Set<String> own, String name) throws IOException {
 		for (String pkg : own) {
-			if (pkg.equals(name) || pkg.startsWith(name + ".")) {
+			if (Packages.coveredBy(name, pkg)) {
 				return true;
 			}
 		}
@@ -148,7 +145,7 @@ public final class FileCheckService {
 
 	private static boolean isOwnOrGenerated(Set<String> own, String name) {
 		for (String pkg : own) {
-			if (name.equals(pkg) || name.startsWith(pkg + ".")) {
+			if (Packages.contains(pkg, name)) {
 				return true;
 			}
 		}
@@ -161,19 +158,7 @@ public final class FileCheckService {
 	}
 
 	private String suggestion(List<Path> dbs, String name) throws IOException {
-		String simple = name.contains(".") ? name.substring(name.lastIndexOf('.') + 1) : name;
-		Set<String> names = new LinkedHashSet<>();
-		for (Path db : dbs) {
-			for (Symbol match : store.searchIn(db, simple, 5)) {
-				names.add(match.fqn());
-				if (names.size() >= 3) {
-					break;
-				}
-			}
-			if (names.size() >= 3) {
-				break;
-			}
-		}
-		return names.isEmpty() ? "" : "maybe: " + String.join(", ", names);
+		List<String> ranked = Suggestions.collect(store, dbs, name, 20, 3);
+		return ranked.isEmpty() ? "" : "maybe: " + String.join(", ", ranked);
 	}
 }

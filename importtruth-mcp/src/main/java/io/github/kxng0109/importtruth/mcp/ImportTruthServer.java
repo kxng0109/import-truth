@@ -37,23 +37,7 @@ public final class ImportTruthServer implements AutoCloseable {
 	 * @throws NullPointerException if any argument is {@code null}
 	 */
 	public ImportTruthServer(PingService ping, InputStream in, OutputStream out) {
-		Objects.requireNonNull(ping, "ping");
-		Objects.requireNonNull(in, "in");
-		Objects.requireNonNull(out, "out");
-		PingTool pingTool = new PingTool(ping);
-		ApiInfo info = ping.ping();
-		StdioServerTransportProvider provider =
-				new StdioServerTransportProvider(McpJsonDefaults.getMapper(), in, out);
-		this.server =
-				McpServer.sync(provider)
-						.serverInfo(info.name(), info.version())
-						.capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
-						.build();
-		server.addTool(
-				McpServerFeatures.SyncToolSpecification.builder()
-						.tool(pingTool.definition())
-						.callHandler((exchange, request) -> pingTool.call())
-						.build());
+		this.server = boot(ping, in, out);
 	}
 
 	/**
@@ -89,20 +73,7 @@ public final class ImportTruthServer implements AutoCloseable {
 		Objects.requireNonNull(jdk, "jdk");
 		Objects.requireNonNull(in, "in");
 		Objects.requireNonNull(out, "out");
-		PingTool pingTool = new PingTool(ping);
-		ApiInfo info = ping.ping();
-		StdioServerTransportProvider provider =
-				new StdioServerTransportProvider(McpJsonDefaults.getMapper(), in, out);
-		this.server =
-				McpServer.sync(provider)
-						.serverInfo(info.name(), info.version())
-						.capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
-						.build();
-		server.addTool(
-				McpServerFeatures.SyncToolSpecification.builder()
-						.tool(pingTool.definition())
-						.callHandler((exchange, request) -> pingTool.call())
-						.build());
+		this.server = boot(ping, in, out);
 		LookupTool lookupTool = new LookupTool(lookup);
 		SearchTool searchTool = new SearchTool(search);
 		server.addTool(
@@ -133,6 +104,26 @@ public final class ImportTruthServer implements AutoCloseable {
 						.tool(checkFilesTool.definition())
 						.callHandler((exchange, request) -> checkFilesTool.call(request.arguments()))
 						.build());
+	}
+
+	private static McpSyncServer boot(PingService ping, InputStream in, OutputStream out) {
+		Objects.requireNonNull(ping, "ping");
+		Objects.requireNonNull(in, "in");
+		Objects.requireNonNull(out, "out");
+		PingTool pingTool = new PingTool(ping);
+		ApiInfo info = ping.ping();
+		StdioServerTransportProvider provider =
+				new StdioServerTransportProvider(McpJsonDefaults.getMapper(), in, out);
+		McpSyncServer server = McpServer.sync(provider)
+				.serverInfo(info.name(), info.version())
+				.capabilities(McpSchema.ServerCapabilities.builder().tools(true).build())
+				.build();
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(pingTool.definition())
+						.callHandler((exchange, request) -> pingTool.call())
+						.build());
+		return server;
 	}
 
 	@Override

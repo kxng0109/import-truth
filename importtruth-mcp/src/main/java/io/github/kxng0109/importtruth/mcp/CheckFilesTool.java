@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Checks many files in one call. Each file keeps the exact lines the
@@ -83,17 +84,19 @@ public final class CheckFilesTool {
 	 */
 	public McpSchema.CallToolResult call(Map<String, Object> arguments) {
 		Objects.requireNonNull(arguments, "arguments");
-		Object project = arguments.get("projectPath");
-		Object raw = arguments.get("filePaths");
-		if (!(project instanceof String projectPath) || projectPath.isBlank()) {
-			return error("projectPath is a required string");
+		Optional<String> project = McpArgs.string(arguments, "projectPath");
+		Optional<List<?>> raw = McpArgs.strings(arguments, "filePaths");
+		if (project.isEmpty()) {
+			return McpResults.err("projectPath is a required string");
 		}
-		if (!(raw instanceof List<?> files) || files.isEmpty()) {
-			return error("filePaths is a required non-empty array");
+		if (raw.isEmpty()) {
+			return McpResults.err("filePaths is a required non-empty array");
 		}
+		List<?> files = raw.get();
 		if (files.size() > MAX_FILES) {
-			return error("at most " + MAX_FILES + " files per call");
+			return McpResults.err("at most " + MAX_FILES + " files per call");
 		}
+		String projectPath = project.get();
 		List<Path> valid = new ArrayList<>();
 		List<String> lines = new ArrayList<>();
 		for (Object item : files) {
@@ -108,9 +111,7 @@ public final class CheckFilesTool {
 			}
 		}
 		if (valid.isEmpty()) {
-			McpSchema.TextContent onlyErrors =
-					McpSchema.TextContent.builder(String.join("\n", lines)).build();
-			return new McpSchema.CallToolResult(List.<McpSchema.Content>of(onlyErrors), false, null, null);
+			return McpResults.ok(lines);
 		}
 		try {
 			Map<Path, List<String>> answers = check.checkFiles(Paths.get(projectPath), valid);
@@ -121,10 +122,9 @@ public final class CheckFilesTool {
 					lines.addAll(entry.getValue());
 				}
 			}
-			McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
-			return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
+			return McpResults.ok(lines);
 		} catch (Exception failure) {
-			return error("check failed: " + failure);
+			return McpResults.err("check failed: " + failure);
 		}
 	}
 

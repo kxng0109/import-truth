@@ -1,5 +1,6 @@
 package io.github.kxng0109.importtruth.mcp;
 
+import io.github.kxng0109.importtruth.core.CheckOrchestrator;
 import io.github.kxng0109.importtruth.core.DependencyResolver;
 import io.github.kxng0109.importtruth.core.DisplayNames;
 import io.github.kxng0109.importtruth.core.FileCheckService;
@@ -9,6 +10,7 @@ import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.CheckResult;
 import io.github.kxng0109.importtruth.model.Finding;
 import io.github.kxng0109.importtruth.model.FindingKind;
+import io.github.kxng0109.importtruth.model.Findings;
 import io.github.kxng0109.importtruth.model.ImportVerdict;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
 import io.github.kxng0109.importtruth.model.PolicyHit;
@@ -95,21 +97,21 @@ public final class CheckFileTool {
 	 */
 	public McpSchema.CallToolResult call(Map<String, Object> arguments) {
 		Objects.requireNonNull(arguments, "arguments");
-		Object project = arguments.get("projectPath");
-		Object file = arguments.get("filePath");
-		if (!(project instanceof String projectPath) || projectPath.isBlank()
-				|| !(file instanceof String filePath) || filePath.isBlank()) {
-			return error("projectPath and filePath are required strings");
+		Optional<String> project = McpArgs.string(arguments, "projectPath");
+		Optional<String> file = McpArgs.string(arguments, "filePath");
+		if (project.isEmpty() || file.isEmpty()) {
+			return McpResults.err("projectPath and filePath are required strings");
 		}
+		String projectPath = project.get();
+		String filePath = file.get();
 		try {
 			List<String> lines = check(Paths.get(projectPath), Paths.get(filePath));
 			if (lines.isEmpty()) {
 				lines.add("clean");
 			}
-			McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
-			return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
+			return McpResults.ok(lines);
 		} catch (Exception failure) {
-			return error("check failed: " + failure);
+			return McpResults.err("check failed: " + failure);
 		}
 	}
 
@@ -129,10 +131,7 @@ public final class CheckFileTool {
 	Map<Path, List<String>> checkFiles(Path projectDir, List<Path> files) throws IOException {
 		FileCheckService check = new FileCheckService(store, indexer, resolver, jdk);
 		List<Path> jars = resolver.resolve(projectDir, false);
-		List<Path> dbs = new ArrayList<>(jars.size());
-		for (Path jar : jars) {
-			dbs.add(store.ensureIndexed(jar, indexer));
-		}
+		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
 		Set<String> own = ProjectPackages.of(projectDir);
 		PolicyEngine policy = loadPack(projectDir, jars, dbs, own);
 		Map<Path, List<String>> answers = new LinkedHashMap<>();
@@ -155,95 +154,25 @@ public final class CheckFileTool {
 			return List.of("ERROR " + DisplayNames.relativizeOrFileName(projectDir, file)
 					+ ": file could not be parsed");
 		}
-		List<Finding> findings = new ArrayList<>(result.findings());
-		for (ImportVerdict verdict : result.verdicts()) {
-			if (!verdict.resolved()) {
-				continue;
-			}
-			Optional<PolicyHit> hit = policy.evaluate(verdict.target(), true);
-			if (hit.isPresent()) {
-				findings.add(new Finding(
-						DisplayNames.relativizeOrFileName(projectDir, file), (int) verdict.line(),
-						FindingKind.POLICY, hit.get().detail(), hit.get().suggestion()));
-			}
-		}
+		List<Finding> findings = CheckOrchestrator.applyPolicy(
+				result,
+				target -> policy.evaluate(target, true),
+				DisplayNames.relativizeOrFileName(projectDir, file));
 		List<String> lines = new ArrayList<>(findings.size());
 		for (Finding finding : findings) {
-			StringBuilder line = new StringBuilder(finding.file()).append(':').append(finding.line())
-					.append(' ').append(finding.kind().name())
-					.append(' ').append(finding.detail());
-			if (!finding.suggestion().isEmpty()) {
-				line.append(" (").append(finding.suggestion()).append(')');
-			}
-			lines.add(line.toString());
+			lines.add(Findings.format(finding));
 		}
 		return lines;
 	}
 
 	private PolicyEngine loadPack(Path projectDir, List<Path> jars, List<Path> dbs, Set<String> own)
 			throws IOException {
-		Path override = projectDir.resolve(".importtruth.yml");
-		PolicyPack pack;
-		if (Files.exists(override)) {
-			try (InputStream in = Files.newInputStream(override)) {
-				pack = PackLoader.load("project", in);
-			}
-		} else {
-			try (InputStream in = CheckFileTool.class.getResourceAsStream("/packs/jackson3.yaml")) {
-				pack = PackLoader.load("jackson3", in);
-			}
-		}
-		return engines.engine(pack, scopeKey(jars, dbs, own), validated -> PolicyValidator.activeRules(
-				validated,
-				name -> packageResolves(dbs, own, name),
-				name -> typeResolves(dbs, name)));
-	}
-
-	/**
-	 * Keys one validation: jar identities, index files, own packages,
-	 * and the running JDK. Any change revalidates.
-	 */
-	private static String scopeKey(List<Path> jars, List<Path> dbs, Set<String> own) throws IOException {
-		StringBuilder key = new StringBuilder();
-		for (Path jar : jars) {
-			key.append(jar.toAbsolutePath()).append(':')
-					.append(Files.getLastModifiedTime(jar).toMillis()).append(':')
-					.append(Files.size(jar)).append('\n');
-		}
-		key.append("dbs=");
-		for (Path db : dbs) {
-			key.append(db.toAbsolutePath()).append(';');
-		}
-		key.append("\nown=");
-		own.stream().sorted().forEach(pkg -> key.append(pkg).append(';'));
-		key.append("\njdk=").append(System.getProperty("java.version", ""));
-		return key.toString();
-	}
-
-	private boolean typeResolves(List<Path> dbs, String name) {
-		try {
-			return !store.findAcross(dbs, name).isEmpty() || jdk.exists(name);
-		} catch (IOException failed) {
-			return false;
-		}
-	}
-
-	private boolean packageResolves(List<Path> dbs, Set<String> own, String name) {
-		for (String pkg : own) {
-			if (pkg.equals(name) || pkg.startsWith(name + ".")) {
-				return true;
-			}
-		}
-		try {
-			for (Path db : dbs) {
-				if (!store.searchIn(db, name + ".", 1).isEmpty()) {
-					return true;
-				}
-			}
-		} catch (IOException failed) {
-			return false;
-		}
-		return jdk.packageExists(name);
+		PolicyPack pack = PackLoader.loadProjectPack(CheckFileTool.class, projectDir);
+		return engines.engine(pack, CheckOrchestrator.scopeKey(jars, dbs, own), validated ->
+				PolicyValidator.activeRules(
+						validated,
+						name -> CheckOrchestrator.packageResolves(store, jdk, dbs, own, name),
+						name -> CheckOrchestrator.typeResolves(store, jdk, dbs, name)));
 	}
 
 	private static McpSchema.CallToolResult error(String message) {

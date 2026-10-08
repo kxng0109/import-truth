@@ -1,5 +1,7 @@
 package io.github.kxng0109.importtruth.core;
 
+import io.github.kxng0109.importtruth.index.Sha256;
+
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
@@ -9,10 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -176,12 +175,7 @@ public final class MavenResolver implements DependencyResolver {
 			seed.append(projectDir.relativize(pom)).append('\n');
 			seed.append(Files.readString(pom, StandardCharsets.UTF_8)).append('\n');
 		}
-		try {
-			MessageDigest digest = MessageDigest.getInstance("SHA-256");
-			return HexFormat.of().formatHex(digest.digest(seed.toString().getBytes(StandardCharsets.UTF_8)));
-		} catch (NoSuchAlgorithmException missing) {
-			throw new IllegalStateException("SHA-256 unavailable", missing);
-		}
+		return Sha256.ofBytes(seed.toString().getBytes(StandardCharsets.UTF_8));
 	}
 
 	private ResolveOutcome runBuildClasspath(Path projectDir, Path module, Path out, boolean offline)

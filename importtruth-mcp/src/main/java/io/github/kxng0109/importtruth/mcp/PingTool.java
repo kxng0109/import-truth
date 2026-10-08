@@ -5,7 +5,6 @@ import io.modelcontextprotocol.spec.McpSchema;
 import io.github.kxng0109.importtruth.core.PingService;
 import io.github.kxng0109.importtruth.model.ApiInfo;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -47,8 +46,6 @@ public final class PingTool {
 	 */
 	public McpSchema.CallToolResult call() {
 		ApiInfo info = ping.ping();
-		McpSchema.TextContent text =
-				McpSchema.TextContent.builder(info.name() + " " + info.version()).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
+		return McpResults.ok(info.name() + " " + info.version());
 	}
 }

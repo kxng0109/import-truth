@@ -8,11 +8,8 @@ import io.github.kxng0109.importtruth.model.Symbol;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * Answers whether a symbol resolves on a project's classpath: indexed
@@ -53,10 +50,7 @@ public final class LookupService {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(symbol, "symbol");
 		List<Path> jars = resolver.resolve(projectDir, false);
-		List<Path> dbs = new ArrayList<>(jars.size());
-		for (Path jar : jars) {
-			dbs.add(store.ensureIndexed(jar, indexer));
-		}
+		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
 		List<Symbol> matches = store.findAcross(dbs, symbol);
 		if (!matches.isEmpty()) {
 			return new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false);
@@ -68,19 +62,6 @@ public final class LookupService {
 	}
 
 	private List<String> suggestions(List<Path> dbs, String symbol) throws IOException {
-		String simple = symbol.contains(".") ? symbol.substring(symbol.lastIndexOf('.') + 1) : symbol;
-		Set<String> names = new LinkedHashSet<>();
-		for (Path db : dbs) {
-			for (Symbol match : store.searchIn(db, simple, 5)) {
-				names.add(match.fqn());
-				if (names.size() >= 5) {
-					break;
-				}
-			}
-			if (names.size() >= 5) {
-				break;
-			}
-		}
-		return List.copyOf(names);
+		return Suggestions.collect(store, dbs, symbol, 20, 5);
 	}
 }

@@ -32,17 +32,11 @@ public final class PolicyCache {
 		Objects.requireNonNull(jarIndex, "jarIndex");
 		Objects.requireNonNull(validator, "validator");
 		Key key = new Key(pack.name(), pack.rules(), jarIndex);
-		PolicyEngine cached = engines.get(key);
-		if (cached != null) {
-			return cached;
-		}
-		PolicyEngine fresh = new PolicyEngine(
-				new PolicyPack(pack.name(), validator.activeRules(pack)));
 		if (engines.size() >= 128) {
 			engines.clear();
 		}
-		PolicyEngine winner = engines.putIfAbsent(key, fresh);
-		return winner != null ? winner : fresh;
+		return engines.computeIfAbsent(
+				key, missing -> new PolicyEngine(new PolicyPack(pack.name(), validator.activeRules(pack))));
 	}
 
 	/**

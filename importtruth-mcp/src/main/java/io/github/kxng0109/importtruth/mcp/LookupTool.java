@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Answers whether a symbol resolves on a project's classpath.
@@ -61,17 +62,18 @@ public final class LookupTool {
 	 */
 	public McpSchema.CallToolResult call(Map<String, Object> arguments) {
 		Objects.requireNonNull(arguments, "arguments");
-		Object project = arguments.get("projectPath");
-		Object symbol = arguments.get("symbol");
-		if (!(project instanceof String projectPath) || projectPath.isBlank()
-				|| !(symbol instanceof String name) || name.isBlank()) {
-			return error("projectPath and symbol are required strings");
+		Optional<String> project = McpArgs.string(arguments, "projectPath");
+		Optional<String> symbol = McpArgs.string(arguments, "symbol");
+		if (project.isEmpty() || symbol.isEmpty()) {
+			return McpResults.err("projectPath and symbol are required strings");
 		}
+		String projectPath = project.get();
+		String name = symbol.get();
 		LookupResult answer;
 		try {
 			answer = lookup.lookup(Paths.get(projectPath), name);
 		} catch (Exception failure) {
-			return error("lookup failed: " + failure);
+			return McpResults.err("lookup failed: " + failure);
 		}
 		List<String> lines = new ArrayList<>();
 		if (!answer.found()) {
@@ -101,12 +103,6 @@ public final class LookupTool {
 				lines.add(row.toString());
 			}
 		}
-		McpSchema.TextContent text = McpSchema.TextContent.builder(String.join("\n", lines)).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), false, null, null);
-	}
-
-	private static McpSchema.CallToolResult error(String message) {
-		McpSchema.TextContent text = McpSchema.TextContent.builder(message).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), true, null, null);
+		return McpResults.ok(lines);
 	}
 }
