@@ -166,6 +166,29 @@ public final class JarIndexStore implements AutoCloseable {
 		});
 	}
 
+	/**
+	 * Searches names by substring without regard to case.
+	 *
+	 * @param db index file, never null
+	 * @param query substring, never null
+	 * @param limit maximum rows, positive
+	 * @return matches ordered by name length, never null
+	 * @throws IOException when the index cannot be read
+	 */
+	public List<Symbol> searchInInsensitive(Path db, String query, int limit) throws IOException {
+		Objects.requireNonNull(db, "db");
+		Objects.requireNonNull(query, "query");
+		if (limit <= 0) {
+			throw new IllegalArgumentException("limit must be positive");
+		}
+		String sql = "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
+				+ " FROM symbols WHERE fqn ILIKE ? ESCAPE '\\' ORDER BY LENGTH(fqn), fqn LIMIT ?";
+		return queryList(db, sql, "Search failed on ", statement -> {
+			statement.setString(1, "%" + escapeLike(query) + "%");
+			statement.setInt(2, limit);
+		});
+	}
+
 	private List<Symbol> queryList(Path db, String sql, String failurePrefix, Binder binder)
 			throws IOException {
 		synchronized (this) {

@@ -119,7 +119,9 @@ A sample hook config lives in `.pre-commit-config.yaml`. The MCP server
 additionally exposes `lookup_symbol`, `search_api`, and `check_file`
 under `mcp.servers` for checks driven by the model, plus batch variants
 `lookup_symbols` and `check_files` (up to 50 items per call) for
-sweep phases where round trips dominate.
+sweep phases where round trips dominate. `suggest_imports` ranks
+dependency names for wanted imports with case insensitive matching,
+up to 50 names per call and 5 suggestions per name by default.
 
 ## Status
 

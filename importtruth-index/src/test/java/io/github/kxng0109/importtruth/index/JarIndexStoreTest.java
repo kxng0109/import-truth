@@ -93,6 +93,41 @@ final class JarIndexStoreTest {
 	}
 
 	@Test
+	@DisplayName("searches without regard to case and escapes wildcards")
+	void searchesInsensitive() throws Exception {
+		JarIndexStore store = openStore("insensitive");
+		Path db = store.ensureIndexed(fakeJar("case.jar"), new FakeIndexer());
+
+		assertThat(store.searchInInsensitive(db, "widget", 5))
+				.as("lowercase finds Widget")
+				.hasSize(2);
+		assertThat(store.searchInInsensitive(db, "WIDGET", 5))
+				.as("uppercase finds Widget")
+				.hasSize(2);
+		assertThat(store.searchInInsensitive(db, "Wid%", 5))
+				.as("percent escaped literally")
+				.isEmpty();
+		assertThatThrownBy(() -> store.searchInInsensitive(db, "x", 0))
+				.as("non-positive limit rejected")
+				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	@DisplayName("rejects null insensitive queries")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullInsensitive() throws Exception {
+		JarIndexStore store = openStore("insensitive-null");
+		Path db = store.ensureIndexed(fakeJar("null.jar"), new FakeIndexer());
+
+		assertThatThrownBy(() -> store.searchInInsensitive(null, "x", 5))
+				.as("null db rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> store.searchInInsensitive(db, null, 5))
+				.as("null query rejection")
+				.isInstanceOf(NullPointerException.class);
+	}
+
+	@Test
 	@DisplayName("indexes each library once under parallel requests")
 	@Timeout(value = 30, unit = TimeUnit.SECONDS)
 	void indexesOnceUnderParallelRequests() throws Exception {
