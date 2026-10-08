@@ -86,21 +86,28 @@ public final class FileCheckService {
 			return new CheckResult(false, List.of(), List.of());
 		}
 		String display = DisplayNames.relativizeOrFileName(projectDir, file);
+		int target = JdkTarget.of(projectDir).orElse(-1);
 		List<Finding> findings = new ArrayList<>();
 		List<ImportVerdict> verdicts = new ArrayList<>();
 		for (ImportRef ref : scan.imports()) {
-			checkImport(dbs, own, display, ref, verdicts).ifPresent(findings::add);
+			checkImport(dbs, own, display, ref, verdicts, target).ifPresent(findings::add);
 		}
 		return new CheckResult(true, findings, verdicts);
 	}
 
 	private Optional<Finding> checkImport(
-			List<Path> dbs, Set<String> own, String display, ImportRef ref, List<ImportVerdict> verdicts)
+			List<Path> dbs,
+			Set<String> own,
+			String display,
+			ImportRef ref,
+			List<ImportVerdict> verdicts,
+			int target)
 			throws IOException {
 		if (ref.wildcard()) {
-			return checkWildcard(dbs, own, display, ref, verdicts);
+			return checkWildcard(dbs, own, display, ref, verdicts, target);
 		}
-		if (!store.findAcross(dbs, ref.target()).isEmpty() || jdk.exists(ref.target())) {
+		boolean jdkHit = target >= 0 ? jdk.existsIn(ref.target(), target) : jdk.exists(ref.target());
+		if (!store.findAcross(dbs, ref.target()).isEmpty() || jdkHit) {
 			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 			return Optional.empty();
 		}
@@ -114,9 +121,14 @@ public final class FileCheckService {
 	}
 
 	private Optional<Finding> checkWildcard(
-			List<Path> dbs, Set<String> own, String display, ImportRef ref, List<ImportVerdict> verdicts)
+			List<Path> dbs,
+			Set<String> own,
+			String display,
+			ImportRef ref,
+			List<ImportVerdict> verdicts,
+			int target)
 			throws IOException {
-		if (packageExists(dbs, own, ref.target())) {
+		if (packageExists(dbs, own, ref.target(), target)) {
 			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 			return Optional.empty();
 		}
@@ -129,7 +141,8 @@ public final class FileCheckService {
 						"package " + ref.target() + " resolves nowhere", suggestion(dbs, ref.target())));
 	}
 
-	private boolean packageExists(List<Path> dbs, Set<String> own, String name) throws IOException {
+	private boolean packageExists(List<Path> dbs, Set<String> own, String name, int target)
+			throws IOException {
 		for (String pkg : own) {
 			if (Packages.coveredBy(name, pkg)) {
 				return true;
@@ -140,7 +153,7 @@ public final class FileCheckService {
 				return true;
 			}
 		}
-		return jdk.packageExists(name);
+		return target >= 0 ? jdk.packageExistsIn(name, target) : jdk.packageExists(name);
 	}
 
 	private static boolean isOwnOrGenerated(Set<String> own, String name) {

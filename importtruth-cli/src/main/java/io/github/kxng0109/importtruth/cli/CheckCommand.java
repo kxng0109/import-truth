@@ -5,6 +5,7 @@ import io.github.kxng0109.importtruth.core.DependencyResolver;
 import io.github.kxng0109.importtruth.core.DisplayNames;
 import io.github.kxng0109.importtruth.core.FileCheckService;
 import io.github.kxng0109.importtruth.core.JdkIndex;
+import io.github.kxng0109.importtruth.core.JdkTarget;
 import io.github.kxng0109.importtruth.core.ProjectPackages;
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.CheckResult;
@@ -92,11 +93,12 @@ public final class CheckCommand {
 			Path projectDir, PrintStream err, List<Path> jars, List<Path> dbs, Set<String> own)
 			throws IOException {
 		PolicyPack pack = PackLoader.loadProjectPack(CheckCommand.class, projectDir);
-		return engines.engine(pack, CheckOrchestrator.scopeKey(jars, dbs, own), validated -> {
+		int target = JdkTarget.of(projectDir).orElse(-1);
+		return engines.engine(pack, CheckOrchestrator.scopeKey(jars, dbs, own, target), validated -> {
 			List<PolicyRule> active = PolicyValidator.activeRules(
 					validated,
-					name -> CheckOrchestrator.packageResolves(store, jdk, dbs, own, name),
-					name -> CheckOrchestrator.typeResolves(store, jdk, dbs, name));
+					name -> CheckOrchestrator.packageResolves(store, jdk, dbs, own, name, target),
+					name -> CheckOrchestrator.typeResolves(store, jdk, dbs, name, target));
 			if (active.size() != validated.rules().size()) {
 				err.println("policy: " + (validated.rules().size() - active.size())
 						+ " rule(s) disabled, targets missing");

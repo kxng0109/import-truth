@@ -62,11 +62,13 @@ final class CheckOrchestratorTest {
 		Path db = files.resolve("a.mv.db");
 		Files.write(db, "index".getBytes(StandardCharsets.UTF_8));
 
-		String key = CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.example"));
-		String changed = CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.other"));
+		String key = CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.example"), 21);
+		String changed = CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.other"), 21);
+		String retargeted = CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.example"), 17);
 
 		assertThat(key).as("key mentions jar").contains("a.jar");
 		assertThat(changed).as("own packages affect key").isNotEqualTo(key);
+		assertThat(retargeted).as("target affects key").isNotEqualTo(key);
 
 		CheckResult result = new CheckResult(true,
 				List.of(new Finding("A.java", 1, FindingKind.MISSING, "import a.B resolves nowhere", "")),
@@ -101,19 +103,20 @@ final class CheckOrchestratorTest {
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, List.of(jar));
 
 		assertThat(dbs).as("one index").hasSize(1);
-		assertThat(CheckOrchestrator.typeResolves(store, jdk, dbs, "com.example.Widget"))
+		assertThat(CheckOrchestrator.typeResolves(store, jdk, dbs, "com.example.Widget", -1))
 				.as("indexed type resolves").isTrue();
-		assertThat(CheckOrchestrator.typeResolves(store, jdk, dbs, "java.util.List"))
-				.as("JDK type resolves").isTrue();
-		assertThat(CheckOrchestrator.typeResolves(store, jdk, dbs, "com.example.Missing"))
+		assertThat(CheckOrchestrator.typeResolves(store, jdk, dbs, "java.util.List", 21))
+				.as("JDK type resolves for target").isTrue();
+		assertThat(CheckOrchestrator.typeResolves(store, jdk, dbs, "com.example.Missing", -1))
 				.as("absent type misses").isFalse();
-		assertThat(CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of("com.acme"), "com.acme"))
+		assertThat(CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of("com.acme"), "com.acme", -1))
 				.as("own package resolves").isTrue();
-		assertThat(CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of(), "com.example"))
+		assertThat(CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of(), "com.example", -1))
 				.as("indexed package resolves").isTrue();
-		assertThat(CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of(), "java.util"))
-				.as("JDK package resolves").isTrue();
-		assertThat(CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of(), "com.example.missing"))
+		assertThat(CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of(), "java.util", 21))
+				.as("JDK package resolves for target").isTrue();
+		assertThat(
+				CheckOrchestrator.packageResolves(store, jdk, dbs, Set.of(), "com.example.missing", -1))
 				.as("absent package misses").isFalse();
 	}
 
@@ -125,9 +128,10 @@ final class CheckOrchestratorTest {
 		openStores.add(store);
 		JdkIndex jdk = new JdkIndex();
 
-		assertThat(CheckOrchestrator.typeResolves(store, jdk, List.of(missing), "com.example.Widget"))
+		assertThat(CheckOrchestrator.typeResolves(store, jdk, List.of(missing), "com.example.Widget", -1))
 				.as("broken type query tolerated").isFalse();
-		assertThat(CheckOrchestrator.packageResolves(store, jdk, List.of(missing), Set.of(), "com.example"))
+		assertThat(
+				CheckOrchestrator.packageResolves(store, jdk, List.of(missing), Set.of(), "com.example", -1))
 				.as("broken package query tolerated").isFalse();
 	}
 
@@ -137,7 +141,7 @@ final class CheckOrchestratorTest {
 	void rejectsNullInputs() {
 		assertThatThrownBy(() -> CheckOrchestrator.indexAll(null, jar -> List.of(), List.of()))
 				.as("null store").isInstanceOf(NullPointerException.class);
-		assertThatThrownBy(() -> CheckOrchestrator.scopeKey(null, List.of(), Set.of()))
+		assertThatThrownBy(() -> CheckOrchestrator.scopeKey(null, List.of(), Set.of(), -1))
 				.as("null jars").isInstanceOf(NullPointerException.class);
 	}
 }

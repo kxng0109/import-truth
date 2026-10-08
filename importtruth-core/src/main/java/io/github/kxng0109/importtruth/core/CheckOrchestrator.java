@@ -61,7 +61,8 @@ public final class CheckOrchestrator {
 	 * @return scope key, never null
 	 * @throws IOException when jar stats cannot be read
 	 */
-	public static String scopeKey(List<Path> jars, List<Path> dbs, Set<String> own) throws IOException {
+	public static String scopeKey(List<Path> jars, List<Path> dbs, Set<String> own, int target)
+			throws IOException {
 		Objects.requireNonNull(jars, "jars");
 		Objects.requireNonNull(dbs, "dbs");
 		Objects.requireNonNull(own, "own");
@@ -76,25 +77,28 @@ public final class CheckOrchestrator {
 		key.append("\nown=");
 		own.stream().sorted().forEach(pkg -> key.append(pkg).append(';'));
 		key.append("\njdk=").append(System.getProperty("java.version", ""));
+		key.append("\ntarget=").append(target);
 		return key.toString();
 	}
 
 	/**
-	 * Tests whether a type resolves in indexes or the JDK.
+	 * Tests whether a type resolves in indexes or the target JDK.
 	 */
-	public static boolean typeResolves(JarIndexStore store, JdkIndex jdk, List<Path> dbs, String name) {
+	public static boolean typeResolves(
+			JarIndexStore store, JdkIndex jdk, List<Path> dbs, String name, int target) {
 		try {
-			return !store.findAcross(dbs, name).isEmpty() || jdk.exists(name);
+			boolean jdkHit = target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name);
+			return !store.findAcross(dbs, name).isEmpty() || jdkHit;
 		} catch (IOException failed) {
 			return false;
 		}
 	}
 
 	/**
-	 * Tests whether a package resolves in own code, indexes, or the JDK.
+	 * Tests whether a package resolves in own code, indexes, or the target JDK.
 	 */
 	public static boolean packageResolves(
-			JarIndexStore store, JdkIndex jdk, List<Path> dbs, Set<String> own, String name) {
+			JarIndexStore store, JdkIndex jdk, List<Path> dbs, Set<String> own, String name, int target) {
 		for (String pkg : own) {
 			if (Packages.coveredBy(name, pkg)) {
 				return true;
@@ -109,7 +113,7 @@ public final class CheckOrchestrator {
 		} catch (IOException failed) {
 			return false;
 		}
-		return jdk.packageExists(name);
+		return target >= 0 ? jdk.packageExistsIn(name, target) : jdk.packageExists(name);
 	}
 
 	/**

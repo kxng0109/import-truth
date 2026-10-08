@@ -55,7 +55,8 @@ public final class LookupService {
 		if (!matches.isEmpty()) {
 			return new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false);
 		}
-		if (jdk.exists(symbol)) {
+		int target = JdkTarget.of(projectDir).orElse(-1);
+		if (target >= 0 ? jdk.existsIn(symbol, target) : jdk.exists(symbol)) {
 			return new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true);
 		}
 		return new LookupResult(false, Confidence.CANDIDATE, List.of(), suggestions(dbs, symbol), false);

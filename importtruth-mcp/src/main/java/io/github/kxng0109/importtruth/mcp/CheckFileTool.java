@@ -5,6 +5,7 @@ import io.github.kxng0109.importtruth.core.DependencyResolver;
 import io.github.kxng0109.importtruth.core.DisplayNames;
 import io.github.kxng0109.importtruth.core.FileCheckService;
 import io.github.kxng0109.importtruth.core.JdkIndex;
+import io.github.kxng0109.importtruth.core.JdkTarget;
 import io.github.kxng0109.importtruth.core.ProjectPackages;
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.CheckResult;
@@ -168,11 +169,12 @@ public final class CheckFileTool {
 	private PolicyEngine loadPack(Path projectDir, List<Path> jars, List<Path> dbs, Set<String> own)
 			throws IOException {
 		PolicyPack pack = PackLoader.loadProjectPack(CheckFileTool.class, projectDir);
-		return engines.engine(pack, CheckOrchestrator.scopeKey(jars, dbs, own), validated ->
+		int target = JdkTarget.of(projectDir).orElse(-1);
+		return engines.engine(pack, CheckOrchestrator.scopeKey(jars, dbs, own, target), validated ->
 				PolicyValidator.activeRules(
 						validated,
-						name -> CheckOrchestrator.packageResolves(store, jdk, dbs, own, name),
-						name -> CheckOrchestrator.typeResolves(store, jdk, dbs, name)));
+						name -> CheckOrchestrator.packageResolves(store, jdk, dbs, own, name, target),
+						name -> CheckOrchestrator.typeResolves(store, jdk, dbs, name, target)));
 	}
 
 	private static McpSchema.CallToolResult error(String message) {
