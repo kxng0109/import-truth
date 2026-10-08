@@ -11,7 +11,7 @@ Java first.
 ## How it works (big picture)
 
 1. **Resolve.** Ask Maven which exact library (JAR) files your project uses.
-   Remember the answer; ask again only when your build files change. No
+   Remember the answer. Ask again only when your build files change. No
    guessing, no "probably this version".
 2. **Index.** Open each library once and write down every public class it
    offers, like an index at the back of a book. Each library is filed under
@@ -22,21 +22,21 @@ Java first.
    correction line naming the right class.
 
 The tool never changes your project. It only reads. It never runs library
-code either; it only reads the shape of it.
+code either. It only reads the shape of it.
 
 ## Concepts you will keep meeting
 
 - **ASM.** A small library that reads Java `.class` files without running
-  them. An X-ray machine: it sees names, signatures, and deprecation marks
+  them. Like a scanner, it sees names, signatures, and deprecation marks
   without waking the patient.
-- **Code-skipping.** A class file has declarations (names and signatures)
-  plus the actual step-by-step instructions. We tell ASM to jump over the
+- **Code skipping.** A class file has declarations (names and signatures)
+  plus the actual step by step instructions. We tell ASM to jump over the
   instructions, so indexing is fast, small, and provably never executes
   anything.
-- **Content-addressed index.** Files are filed by content fingerprint, not by
+- **Content fingerprints.** Files are filed by content fingerprint, not by
   name or version number. Same content means same fingerprint, so duplicates
   and stale snapshots stop being a problem.
-- **Single-flight.** If five checks ask for the same library at once, only
+- **Single flight.** If five checks ask for the same library at once, only
   one of them does the indexing work and the other four wait for the result.
   Teamwork, enforced by a hash map.
 - **MCP server.** The way the tool talks to the agent: short questions and
@@ -55,10 +55,13 @@ code either; it only reads the shape of it.
 
 ## Boxes (modules)
 
-- `importtruth-model` — data shapes only. Zero dependencies, by rule.
-- `importtruth-core` — the brain: resolve, index, lookup, check.
-- `importtruth-mcp` — talks to the agent. Never touches libraries directly.
-- `importtruth-cli` — startup and wiring. Builds the final single JAR.
+- `importtruth-model`: data shapes only. Zero dependencies, by rule.
+- `importtruth-policy`: migration rule packs and their validation.
+- `importtruth-index`: library indexes filed by content fingerprint.
+- `importtruth-adapter-java`: reads Java bytecode without running it.
+- `importtruth-core`: the brain: resolve, index, lookup, check.
+- `importtruth-mcp`: talks to the agent. Never touches libraries directly.
+- `importtruth-cli`: startup and wiring. Builds the final one JAR.
 
 ## Build (needs JDK 21+)
 
@@ -72,13 +75,20 @@ Slow tests (real Maven spawns, heavy fixtures) carry `@Tag("slow")`:
 `mvn test` runs the fast loop only, `mvn verify` runs everything
 including coverage gates.
 
-Resolving a multi-module project needs its sibling snapshots
-installed (`mvn install` once); otherwise resolution fails loudly
+A project with several modules needs its sibling snapshots
+installed (`mvn install` once). Otherwise resolution fails loudly
 rather than guessing. CI runs `install` for exactly this reason.
 
 Every module enforces coverage gates on `verify`: 95% line, 90% branch
-(the `Main` wiring class is excluded; everything else is tested). The
+(the `Main` wiring class is excluded. Everything else is tested). The
 gates have already caught real bugs, so they stay.
+
+Warm checks answer in about 0.2s: resolution, indexes, parsed files,
+and validated policy engines are all memoized per session. JDK answers
+come from the project's target release (read from the running JDK's
+`ct.sym`), never the running JVM alone, so projects that target other
+releases get honest verdicts. Misses get ranked suggestions: exact
+names first, then names from the same package, then small typos.
 
 ## Enforcement
 
@@ -87,24 +97,25 @@ into the session. Install it and point it at the shaded JAR:
 
 ```text
 opencode plugin: opencode-plugin/importtruth.ts
-IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.2.0-SNAPSHOT.jar
+IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.3.0-SNAPSHOT.jar
 ```
 
 Direct check of files (exit 1 on missing imports, silent when clean):
 
 ```text
-java -jar importtruth-cli/target/importtruth-cli-0.2.0-SNAPSHOT.jar check <project> <file>...
+java -jar importtruth-cli/target/importtruth-cli-0.3.0-SNAPSHOT.jar check <project> <file>...
 ```
 
-A pre-commit sample lives in `.pre-commit-config.yaml`. The MCP server
+A sample hook config lives in `.pre-commit-config.yaml`. The MCP server
 additionally exposes `lookup_symbol`, `search_api`, and `check_file`
-under `mcp.servers` for model-driven checks, plus batch variants
+under `mcp.servers` for checks driven by the model, plus batch variants
 `lookup_symbols` and `check_files` (up to 50 items per call) for
 sweep phases where round trips dominate.
 
 ## Status
 
-M2 done: file check, policy packs, hook plugin, pre-commit sample
-(102 tests green, zero warnings; hook proven live against subagent edits).
-Coverage gates green on all 7 modules. Next is M3: daemon and
-concurrency hardening.
+Shipped in 0.3.0: batch tools (`lookup_symbols`, `check_files`),
+warm checks under a second, ranked suggestions, JDK answers for every
+target release.
+Coverage gates green on all 7 modules. Daemon deferred: sharing is
+safe by construction, and answers in the same process are already fast.
