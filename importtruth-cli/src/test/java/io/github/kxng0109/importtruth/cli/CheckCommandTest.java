@@ -23,6 +23,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 import java.nio.file.Paths;
@@ -293,6 +294,43 @@ final class CheckCommandTest {
 				.as("outside file rejected")
 				.isInstanceOf(IOException.class)
 				.hasMessageContaining("outside the project");
+	}
+
+	@Test
+	@DisplayName("checks many files with one shared resolve")
+	void checksManyWithSharedResolve() throws Exception {
+		Path jar = files.resolve("fake-dep.jar");
+		if (!Files.exists(jar)) {
+			try (OutputStream out = Files.newOutputStream(jar);
+					JarOutputStream zip = new JarOutputStream(out)) {
+				zip.putNextEntry(new ZipEntry("META-INF/"));
+				zip.closeEntry();
+			}
+		}
+		JarIndexStore store = openStore(state.resolve("shared-index"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.fasterxml.jackson.databind.ObjectMapper", SymbolKind.CLASS, null, null, false,
+						"", false),
+				new Symbol("tools.jackson.databind.ObjectMapper", SymbolKind.CLASS, null, null, false, "", false));
+		AtomicInteger resolves = new AtomicInteger();
+		DependencyResolver resolver = (projectDir, allowNetwork) -> {
+			resolves.incrementAndGet();
+			return List.of(jar);
+		};
+		CheckCommand command = new CheckCommand(store, indexer, resolver, new JdkIndex());
+		Path clean = file("Clean.java",
+				"package com.other; import java.util.List; public class Clean { List<String> items; }");
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+		int exit = command.runAll(new PrintStream(out, true, StandardCharsets.UTF_8), System.err, files,
+				List.of(clean, missing));
+
+		assertThat(resolves.get()).as("single resolve").isEqualTo(1);
+		assertThat(exit).as("missing exit").isEqualTo(1);
+		assertThat(out.toString(StandardCharsets.UTF_8)).as("missing line")
+				.contains("MISSING").contains("org.example.Nope");
 	}
 
 	private CheckCommand fakeCommand() throws Exception {

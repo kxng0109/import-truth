@@ -1,8 +1,10 @@
 package io.github.kxng0109.importtruth.mcp;
 
 import io.github.kxng0109.importtruth.core.LookupService;
+import io.github.kxng0109.importtruth.model.LookupResult;
 import io.modelcontextprotocol.spec.McpSchema;
 
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +24,7 @@ public final class LookupSymbolsTool {
 	/** Maximum symbols per call. Keeps answers small enough to read. */
 	static final int MAX_SYMBOLS = 50;
 
+	private final LookupService service;
 	private final LookupTool lookup;
 
 	/**
@@ -31,7 +34,8 @@ public final class LookupSymbolsTool {
 	 * @throws NullPointerException if {@code lookup} is {@code null}
 	 */
 	public LookupSymbolsTool(LookupService lookup) {
-		this.lookup = new LookupTool(Objects.requireNonNull(lookup, "lookup"));
+		this.service = Objects.requireNonNull(lookup, "lookup");
+		this.lookup = new LookupTool(this.service);
 	}
 
 	/**
@@ -82,21 +86,33 @@ public final class LookupSymbolsTool {
 			return McpResults.err("at most " + MAX_SYMBOLS + " symbols per call");
 		}
 		String projectPath = project.get();
+		List<String> valid = new ArrayList<>();
+		for (Object item : symbols) {
+			if (item instanceof String name && !name.isBlank()) {
+				valid.add(name);
+			}
+		}
+		Map<String, LookupResult> answers;
+		try {
+			answers = service.lookupBatch(Paths.get(projectPath), valid);
+		} catch (Exception failure) {
+			List<String> errors = new ArrayList<>();
+			for (Object item : symbols) {
+				if (!(item instanceof String name) || name.isBlank()) {
+					errors.add("ERROR symbol must be a non-blank string");
+				} else {
+					errors.add("ERROR " + name + ": lookup failed: " + failure);
+				}
+			}
+			return McpResults.ok(errors);
+		}
 		List<String> lines = new ArrayList<>();
 		for (Object item : symbols) {
 			if (!(item instanceof String name) || name.isBlank()) {
 				lines.add("ERROR symbol must be a non-blank string");
 				continue;
 			}
-			McpSchema.CallToolResult single =
-					lookup.call(Map.of("projectPath", projectPath, "symbol", name));
-			Object payload = single.content().isEmpty() ? null : single.content().get(0);
-			String text = payload instanceof McpSchema.TextContent typed ? typed.text() : "<unrenderable>";
-			if (single.isError()) {
-				lines.add("ERROR " + name + ": " + text);
-			} else {
-				lines.addAll(List.of(text.split("\n")));
-			}
+			lines.addAll(lookup.lines(name, answers.get(name)));
 		}
 		return McpResults.ok(lines);
 	}

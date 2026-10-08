@@ -17,6 +17,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
@@ -123,6 +125,56 @@ final class LookupSearchTest {
 				.contains("com.example.Widget", "com.example.WidgetInfo");
 	}
 
+	@Test
+	@DisplayName("batches lookups with one shared resolve")
+	void batchesWithSharedResolve() throws Exception {
+		Path jar = project.resolve("dep.jar");
+		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new ZipEntry("META-INF/"));
+			zip.closeEntry();
+		}
+		JarIndexStore store = openStore(state.resolve("batch-index"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
+		AtomicInteger resolves = new AtomicInteger();
+		DependencyResolver resolver = (projectDir, allowNetwork) -> {
+			resolves.incrementAndGet();
+			return List.of(jar);
+		};
+		LookupService lookup = new LookupService(store, indexer, resolver, new JdkIndex());
+
+		List<String> wanted = new ArrayList<>(
+				List.of("com.example.Widget", "org.example.Widget", "org.example.Nope", " ", "java.util.ArrayList"));
+		wanted.add(null);
+		Map<String, LookupResult> answers = lookup.lookupBatch(project, wanted);
+
+		assertThat(resolves.get()).as("single resolve").isEqualTo(1);
+		assertThat(answers.get("com.example.Widget").found()).as("hit found").isTrue();
+		assertThat(answers.get("org.example.Widget").found()).as("wrong package miss").isFalse();
+		assertThat(answers.get("org.example.Widget").suggestions()).as("miss suggests neighbor")
+				.contains("com.example.Widget");
+		assertThat(answers.get("org.example.Nope").found()).as("unknown miss").isFalse();
+		assertThat(answers.get(" ").found()).as("blank miss").isFalse();
+		assertThat(answers.get(null).found()).as("null miss").isFalse();
+		assertThat(answers.get("java.util.ArrayList").fromJdk()).as("JDK flagged").isTrue();
+		assertThat(lookup.lookup(project, "com.example.Widget"))
+				.as("batch matches single")
+				.isEqualTo(answers.get("com.example.Widget"));
+	}
+
+	@Test
+	@DisplayName("rejects null batch inputs")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullBatch() throws Exception {
+		Services services = services();
+
+		assertThatThrownBy(() -> services.lookup().lookupBatch(null, List.of("a.B")))
+				.as("null project rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> services.lookup().lookupBatch(project, null))
+				.as("null symbols rejection")
+				.isInstanceOf(NullPointerException.class);
+	}
 	@Test
 	@DisplayName("search caps rows")
 	void searchCapsRows() throws Exception {

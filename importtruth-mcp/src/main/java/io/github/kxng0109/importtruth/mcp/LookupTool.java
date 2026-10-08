@@ -75,6 +75,19 @@ public final class LookupTool {
 		} catch (Exception failure) {
 			return McpResults.err("lookup failed: " + failure);
 		}
+		return McpResults.ok(lines(name, answer));
+	}
+
+	/**
+	 * Renders one answer with the exact single symbol lines.
+	 *
+	 * @param name wanted fully qualified name, never null
+	 * @param answer lookup answer, never null
+	 * @return verdict lines, never null
+	 */
+	public List<String> lines(String name, LookupResult answer) {
+		Objects.requireNonNull(name, "name");
+		Objects.requireNonNull(answer, "answer");
 		List<String> lines = new ArrayList<>();
 		if (!answer.found()) {
 			lines.add("NOT_FOUND " + answer.confidence().name() + " " + name);
@@ -103,6 +116,6 @@ public final class LookupTool {
 				lines.add(row.toString());
 			}
 		}
-		return McpResults.ok(lines);
+		return lines;
 	}
 }

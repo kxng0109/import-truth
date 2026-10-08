@@ -13,6 +13,8 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.ServiceLoader;
 import java.util.concurrent.CountDownLatch;
 
@@ -40,11 +42,11 @@ public final class Main {
 		if (args.length >= 3 && "check".equals(args[0])) {
 			CheckCommand command = new CheckCommand(store, indexer, resolver, jdk);
 			Path project = Paths.get(args[1]);
-			int exit = 0;
+			List<Path> files = new ArrayList<>();
 			for (int i = 2; i < args.length; i++) {
-				exit = Math.max(exit, command.run(System.out, System.err, project, Paths.get(args[i])));
+				files.add(Paths.get(args[i]));
 			}
-			System.exit(exit);
+			System.exit(command.runAll(System.out, System.err, project, files));
 			return;
 		}
 		// Standard output is the protocol channel: keep it, then point all

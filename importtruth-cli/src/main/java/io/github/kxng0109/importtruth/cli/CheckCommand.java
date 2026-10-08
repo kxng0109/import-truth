@@ -70,23 +70,49 @@ public final class CheckCommand {
 		Objects.requireNonNull(err, "err");
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(file, "file");
+		return runAll(out, err, projectDir, List.of(file));
+	}
+
+	/**
+	 * Runs the check over many files with one shared resolve plus
+	 * index plus pack pass.
+	 *
+	 * @param out findings sink, never null
+	 * @param err diagnostics sink, never null
+	 * @param projectDir project root, never null
+	 * @param files source files, never null
+	 * @return 1 when a missing import exists, else 0
+	 * @throws IOException when resolution, indexing, or pack loading fails
+	 */
+	public int runAll(PrintStream out, PrintStream err, Path projectDir, List<Path> files)
+			throws IOException {
+		Objects.requireNonNull(out, "out");
+		Objects.requireNonNull(err, "err");
+		Objects.requireNonNull(projectDir, "projectDir");
+		Objects.requireNonNull(files, "files");
 		FileCheckService check = new FileCheckService(store, indexer, resolver, jdk);
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
 		Set<String> own = ProjectPackages.of(projectDir);
 		PolicyEngine policy = loadPack(projectDir, err, jars, dbs, own);
-		CheckResult result = check.checkWith(projectDir, file, dbs, own);
-		if (!result.healthy()) {
-			return 0;
+		int exit = 0;
+		for (Path file : files) {
+			CheckResult result = check.checkWith(projectDir, file, dbs, own);
+			if (!result.healthy()) {
+				continue;
+			}
+			List<Finding> findings = CheckOrchestrator.applyPolicy(
+					result,
+					target -> policy.evaluate(target, true),
+					DisplayNames.relativizeOrFileName(projectDir, file));
+			for (Finding finding : findings) {
+				out.println(Findings.format(finding));
+			}
+			if (findings.stream().anyMatch(f -> f.kind() == FindingKind.MISSING)) {
+				exit = 1;
+			}
 		}
-		List<Finding> findings = CheckOrchestrator.applyPolicy(
-				result,
-				target -> policy.evaluate(target, true),
-				DisplayNames.relativizeOrFileName(projectDir, file));
-		for (Finding finding : findings) {
-			out.println(Findings.format(finding));
-		}
-		return findings.stream().anyMatch(f -> f.kind() == FindingKind.MISSING) ? 1 : 0;
+		return exit;
 	}
 
 	private PolicyEngine loadPack(

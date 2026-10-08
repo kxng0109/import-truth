@@ -226,7 +226,8 @@ final class MavenResolverTest {
 		Map<String, String> empty = new HashMap<>();
 		MavenResolver.defaultChildHeap(empty);
 
-		assertThat(empty).as("default cap applied").containsEntry("MAVEN_OPTS", "-Xmx512m");
+		assertThat(empty).as("default cap applied")
+				.containsEntry("MAVEN_OPTS", "-Xms64m -Xmx512m -XX:+UseSerialGC");
 
 		Map<String, String> tuned = new HashMap<>(Map.of("MAVEN_OPTS", "-Xmx2g"));
 		MavenResolver.defaultChildHeap(tuned);

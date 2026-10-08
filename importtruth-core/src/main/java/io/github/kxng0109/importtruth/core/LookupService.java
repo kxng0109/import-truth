@@ -8,7 +8,9 @@ import io.github.kxng0109.importtruth.model.Symbol;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -60,6 +62,45 @@ public final class LookupService {
 			return new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false);
 		}
 		int target = JdkTarget.of(projectDir).orElse(-1);
+		if (target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name)) {
+			return new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true);
+		}
+		return new LookupResult(false, Confidence.CANDIDATE, List.of(), suggestions(dbs, name), false);
+	}
+
+	/**
+	 * Looks many symbols up with one shared resolve plus index pass.
+	 *
+	 * @param projectDir project root, never null
+	 * @param symbols wanted fully qualified names, never null
+	 * @return answers per input in order, never null
+	 * @throws IOException when resolution or indexing fails
+	 */
+	public Map<String, LookupResult> lookupBatch(Path projectDir, List<String> symbols) throws IOException {
+		Objects.requireNonNull(projectDir, "projectDir");
+		Objects.requireNonNull(symbols, "symbols");
+		List<Path> jars = resolver.resolve(projectDir, false);
+		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
+		int target = JdkTarget.of(projectDir).orElse(-1);
+		Map<String, LookupResult> answers = new LinkedHashMap<>();
+		for (String symbol : symbols) {
+			answers.put(symbol, answerFor(dbs, target, symbol));
+		}
+		return answers;
+	}
+
+	private LookupResult answerFor(List<Path> dbs, int target, String symbol) throws IOException {
+		if (symbol == null || symbol.isBlank()) {
+			return new LookupResult(false, Confidence.CANDIDATE, List.of(), List.of(), false);
+		}
+		String name = plainSymbol(symbol);
+		if (name.isBlank()) {
+			return new LookupResult(false, Confidence.CANDIDATE, List.of(), List.of(), false);
+		}
+		List<Symbol> matches = store.findAcross(dbs, name);
+		if (!matches.isEmpty()) {
+			return new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false);
+		}
 		if (target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name)) {
 			return new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true);
 		}

@@ -144,6 +144,9 @@ public final class MavenResolver implements DependencyResolver {
 	 * distinct project directory, so long sessions stay flat.
 	 */
 	private void remember(Path key, Path projectDir, String hash, List<Path> jars) throws IOException {
+		if (memory.size() >= 128) {
+			memory.clear();
+		}
 		memory.put(key, new MemEntry(pomStats(projectDir), hash, jars));
 	}
 
@@ -268,8 +271,9 @@ public final class MavenResolver implements DependencyResolver {
 	}
 
 	/**
-	 * Caps nested Maven heap at 512m unless the user already tunes the
-	 * child JVM. Resolving classpaths never needs a gigabyte heap.
+	 * Caps nested Maven heap plus collector unless the user already
+	 * tunes the child JVM. Resolving classpaths never needs a gigabyte
+	 * heap, and one collection thread keeps build bursts small.
 	 *
 	 * @param environment child environment, never null
 	 */
@@ -277,7 +281,7 @@ public final class MavenResolver implements DependencyResolver {
 		if (!environment.containsKey("MAVEN_OPTS")
 				&& !environment.containsKey("JAVA_TOOL_OPTIONS")
 				&& !environment.containsKey("JDK_JAVA_OPTIONS")) {
-			environment.put("MAVEN_OPTS", "-Xmx512m");
+			environment.put("MAVEN_OPTS", "-Xms64m -Xmx512m -XX:+UseSerialGC");
 		}
 	}
 
