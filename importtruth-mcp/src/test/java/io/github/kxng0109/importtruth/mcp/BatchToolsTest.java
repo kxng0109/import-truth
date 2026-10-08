@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -41,6 +42,26 @@ final class BatchToolsTest {
 
 	@TempDir
 	private Path state;
+
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(Path dir) throws IOException {
+		JarIndexStore created = new JarIndexStore(dir);
+		openStores.add(created);
+		return created;
+	}
 
 	@Test
 	@DisplayName("batches found, missing, and broken items")
@@ -79,7 +100,7 @@ final class BatchToolsTest {
 		Path clean = file("Clean.java",
 				"package com.other; import java.util.List; public class Clean { List<String> items; }");
 		Path jar = project.resolve("dep.jar");
-		CheckFileTool singleCheck = new CheckFileTool(new JarIndexStore(state.resolve("single-check")),
+		CheckFileTool singleCheck = new CheckFileTool(openStore(state.resolve("single-check")),
 				jarFile -> List.of(
 						new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false)),
 				(projectDir, allowNetwork) -> List.of(jar), new JdkIndex());
@@ -176,7 +197,7 @@ final class BatchToolsTest {
 			zip.putNextEntry(new ZipEntry("META-INF/"));
 			zip.closeEntry();
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		JarIndexStore store = openStore(state.resolve("index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
 		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
@@ -194,7 +215,7 @@ final class BatchToolsTest {
 				zip.closeEntry();
 			}
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("check-index"));
+		JarIndexStore store = openStore(state.resolve("check-index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
 		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
@@ -202,7 +223,7 @@ final class BatchToolsTest {
 	}
 
 	private LookupService failingLookupService() throws Exception {
-		JarIndexStore store = new JarIndexStore(state.resolve("failing-index"));
+		JarIndexStore store = openStore(state.resolve("failing-index"));
 		LibraryIndexer indexer = jarFile -> List.of();
 		DependencyResolver resolver = (projectDir, allowNetwork) -> {
 			throw new IOException("no network");
@@ -211,7 +232,7 @@ final class BatchToolsTest {
 	}
 
 	private CheckFilesTool failingFilesTool() throws Exception {
-		JarIndexStore store = new JarIndexStore(state.resolve("failing-check"));
+		JarIndexStore store = openStore(state.resolve("failing-check"));
 		LibraryIndexer indexer = jarFile -> List.of();
 		DependencyResolver resolver = (projectDir, allowNetwork) -> {
 			throw new IOException("no network");

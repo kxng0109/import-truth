@@ -98,7 +98,9 @@ java -jar importtruth-cli/target/importtruth-cli-0.2.0-SNAPSHOT.jar check <proje
 
 A pre-commit sample lives in `.pre-commit-config.yaml`. The MCP server
 additionally exposes `lookup_symbol`, `search_api`, and `check_file`
-under `mcp.servers` for model-driven checks.
+under `mcp.servers` for model-driven checks, plus batch variants
+`lookup_symbols` and `check_files` (up to 50 items per call) for
+sweep phases where round trips dominate.
 
 ## Status
 

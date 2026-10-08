@@ -19,11 +19,13 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -40,6 +42,26 @@ final class LookupSearchToolTest {
 	@TempDir
 	private Path state;
 
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(Path dir) throws IOException {
+		JarIndexStore created = new JarIndexStore(dir);
+		openStores.add(created);
+		return created;
+	}
+
 	@Test
 	@DisplayName("answers found, missing, and search")
 	void answersTools() throws Exception {
@@ -54,7 +76,7 @@ final class LookupSearchToolTest {
 		assertThat(missing).as("missing line").startsWith("NOT_FOUND CANDIDATE org.example.Widget");
 
 		String hits = textOf(search.call(Map.of("projectPath", project.toString(), "query", "Widget", "limit", 1)));
-		assertThat(hits).as("capped hits").doesNotContain("\n");
+		assertThat(hits).as("exactly one capped hit").isEqualTo("hit: com.example.Widget (CLASS)");
 	}
 
 	@Test
@@ -80,7 +102,7 @@ final class LookupSearchToolTest {
 
 		assertThat(textOf(lookup.call(Map.of("projectPath", project.toString(), "symbol", "java.util.List"))))
 				.as("jdk line")
-				.contains("(jdk)");
+				.isEqualTo("FOUND DEFINITE java.util.List (jdk)");
 		String deprecated = textOf(lookup
 				.call(Map.of("projectPath", project.toString(), "symbol", "com.example.Old.build")));
 		assertThat(deprecated).as("deprecated detail").contains("deprecated").contains("since 1.2");
@@ -145,7 +167,7 @@ final class LookupSearchToolTest {
 			zip.putNextEntry(new ZipEntry("META-INF/"));
 			zip.closeEntry();
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		JarIndexStore store = openStore(state.resolve("index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
 		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
@@ -164,7 +186,7 @@ final class LookupSearchToolTest {
 			zip.write("rich".getBytes(StandardCharsets.UTF_8));
 			zip.closeEntry();
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("rich-index"));
+		JarIndexStore store = openStore(state.resolve("rich-index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Old", SymbolKind.CLASS, null, null, false, "", false),
 				new Symbol("com.example.Old.build", SymbolKind.METHOD, "()V", "com.example.Old", true, "1.2",
@@ -180,7 +202,7 @@ final class LookupSearchToolTest {
 	}
 
 	private LookupService failingLookup() throws Exception {
-		JarIndexStore store = new JarIndexStore(state.resolve("failing-index"));
+		JarIndexStore store = openStore(state.resolve("failing-index"));
 		LibraryIndexer indexer = jarFile -> List.of();
 		DependencyResolver resolver = (projectDir, allowNetwork) -> {
 			throw new IOException("no network");
@@ -189,7 +211,7 @@ final class LookupSearchToolTest {
 	}
 
 	private SearchService failingSearch() throws Exception {
-		JarIndexStore store = new JarIndexStore(state.resolve("failing-search"));
+		JarIndexStore store = openStore(state.resolve("failing-search"));
 		LibraryIndexer indexer = jarFile -> List.of();
 		DependencyResolver resolver = (projectDir, allowNetwork) -> {
 			throw new IOException("no network");

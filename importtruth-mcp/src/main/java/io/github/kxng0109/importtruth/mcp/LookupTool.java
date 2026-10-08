@@ -80,7 +80,7 @@ public final class LookupTool {
 				lines.add("maybe: " + suggestion);
 			}
 		} else if (answer.fromJdk()) {
-			lines.add("FOUND definite " + name + " (jdk)");
+			lines.add("FOUND DEFINITE " + name + " (jdk)");
 		} else {
 			lines.add("FOUND " + answer.confidence().name() + " " + name);
 			for (Symbol match : answer.matches()) {

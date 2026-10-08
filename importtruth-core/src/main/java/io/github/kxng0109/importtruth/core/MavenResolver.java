@@ -14,8 +14,10 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -35,6 +37,7 @@ public final class MavenResolver implements DependencyResolver {
 			"org.apache.maven.plugins:maven-dependency-plugin:3.11.0:build-classpath";
 
 	private final Path stateDir;
+	private final Map<Path, MemEntry> memory = new ConcurrentHashMap<>();
 
 	/**
 	 * Creates the resolver.
@@ -60,11 +63,23 @@ public final class MavenResolver implements DependencyResolver {
 	@Override
 	public List<Path> resolve(Path projectDir, boolean allowNetwork) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
+		Path key = projectDir.toAbsolutePath().normalize();
+		MemEntry remembered = memory.get(key);
+		if (remembered != null) {
+			try {
+				if (pomStats(projectDir).equals(remembered.poms())) {
+					return remembered.jars();
+				}
+			} catch (IOException unreadable) {
+				// Fall through to the authoritative hashed path below.
+			}
+		}
 		String hash = hashPoms(projectDir);
 		Path cached = stateDir.resolve("resolve").resolve(hash + ".cp");
 		if (Files.exists(cached)) {
 			List<Path> jars = readClasspath(cached);
 			if (!jars.isEmpty()) {
+				remember(key, projectDir, hash, jars);
 				return jars;
 			}
 		}
@@ -93,10 +108,34 @@ public final class MavenResolver implements DependencyResolver {
 					+ " (hint: sibling snapshot modules may need 'mvn install' first)");
 		}
 		Files.writeString(cached, joinClasspath(jars), StandardCharsets.UTF_8);
+		remember(key, projectDir, hash, jars);
 		return jars;
 	}
 
-	private List<Path> modulesOf(Path projectDir) throws IOException {
+	/**
+	 * Remembers a resolution. Entries are tiny (paths plus numbers);
+	 * the map is capped so long sessions stay flat.
+	 */
+	private void remember(Path key, Path projectDir, String hash, List<Path> jars) throws IOException {
+		memory.put(key, new MemEntry(pomStats(projectDir), hash, jars));
+	}
+
+	private static List<PomStat> pomStats(Path projectDir) throws IOException {
+		List<PomStat> stats = new ArrayList<>();
+		for (Path module : modulesOf(projectDir)) {
+			Path pom = module.resolve("pom.xml");
+			stats.add(new PomStat(pom, Files.getLastModifiedTime(pom).toMillis(), Files.size(pom)));
+		}
+		return stats;
+	}
+
+	private record MemEntry(List<PomStat> poms, String hash, List<Path> jars) {
+	}
+
+	private record PomStat(Path path, long modified, long size) {
+	}
+
+	private static List<Path> modulesOf(Path projectDir) throws IOException {
 		List<Path> modules = new ArrayList<>();
 		if (Files.exists(projectDir.resolve("pom.xml"))) {
 			modules.add(projectDir);

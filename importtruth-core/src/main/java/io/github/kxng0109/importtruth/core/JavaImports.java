@@ -6,15 +6,24 @@ import com.sun.source.util.JavacTask;
 import com.sun.source.util.SourcePositions;
 import com.sun.source.util.Trees;
 
+import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
 import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardJavaFileManager;
 import javax.tools.ToolProvider;
 
@@ -24,11 +33,18 @@ import javax.tools.ToolProvider;
  */
 public final class JavaImports {
 
+	/**
+	 * Parsed scans by file plus the exact content parsed. Entries are
+	 * small source texts, one per distinct file checked in the session.
+	 */
+	private static final Map<Path, Entry> CACHE = new ConcurrentHashMap<>();
+
 	private JavaImports() {
 	}
 
 	/**
-	 * Parses the file's imports.
+	 * Parses the file's imports, reusing the cached scan when the
+	 * content is unchanged.
 	 *
 	 * @param file source file, never null
 	 * @return imports plus a health flag, never null
@@ -36,6 +52,22 @@ public final class JavaImports {
 	 */
 	public static ImportScan of(Path file) {
 		Objects.requireNonNull(file, "file");
+		Path key = file.toAbsolutePath().normalize();
+		try {
+			String content = Files.readString(file, StandardCharsets.UTF_8);
+			Entry remembered = CACHE.get(key);
+			if (remembered != null && remembered.content().equals(content)) {
+				return remembered.scan();
+			}
+			ImportScan scan = parse(file.getFileName().toString(), content);
+			CACHE.put(key, new Entry(content, scan));
+			return scan;
+		} catch (IOException | RuntimeException failed) {
+			return new ImportScan(false, List.of());
+		}
+	}
+
+	private static ImportScan parse(String unitName, String content) throws IOException {
 		JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
 		if (compiler == null) {
 			return new ImportScan(false, List.of());
@@ -43,8 +75,15 @@ public final class JavaImports {
 		DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
 		try (StandardJavaFileManager manager =
 				compiler.getStandardFileManager(diagnostics, null, StandardCharsets.UTF_8)) {
-			Iterable<? extends JavaFileObject> units = manager.getJavaFileObjects(file.toFile());
-			JavacTask task = (JavacTask) compiler.getTask(null, manager, diagnostics, List.of("-proc:none"), null, units);
+			JavaFileObject unit = new SimpleJavaFileObject(
+					URI.create("string:///" + unitName), JavaFileObject.Kind.SOURCE) {
+				@Override
+				public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+					return content;
+				}
+			};
+			JavacTask task = (JavacTask) compiler.getTask(
+					null, manager, diagnostics, List.of("-proc:none"), null, List.of(unit));
 			SourcePositions positions = Trees.instance(task).getSourcePositions();
 			List<ImportRef> imports = new ArrayList<>();
 			for (CompilationUnitTree tree : task.parse()) {
@@ -57,13 +96,19 @@ public final class JavaImports {
 				}
 			}
 			return new ImportScan(healthy(diagnostics), imports);
-		} catch (Exception failed) {
-			return new ImportScan(false, List.of());
 		}
 	}
 
 	private static boolean healthy(DiagnosticCollector<JavaFileObject> diagnostics) {
-		return diagnostics.getDiagnostics().stream().noneMatch(d -> d.getKind() == Diagnostic.Kind.ERROR);
+		for (Diagnostic<? extends JavaFileObject> diagnostic : diagnostics.getDiagnostics()) {
+			if (diagnostic.getKind() == Diagnostic.Kind.ERROR) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private record Entry(String content, ImportScan scan) {
 	}
 
 	/**

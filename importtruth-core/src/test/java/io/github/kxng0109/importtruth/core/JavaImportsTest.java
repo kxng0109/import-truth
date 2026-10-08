@@ -61,4 +61,34 @@ final class JavaImportsTest {
 		assertThat(scan.healthy()).as("directory unhealthy").isFalse();
 		assertThat(scan.imports()).as("no imports").isEmpty();
 	}
+
+	@Test
+	@DisplayName("marks missing files unhealthy")
+	void marksMissingFilesUnhealthy() {
+		ImportScan scan = JavaImports.of(files.resolve("Nope.java"));
+
+		assertThat(scan.healthy()).as("missing file unhealthy").isFalse();
+		assertThat(scan.imports()).as("no imports").isEmpty();
+	}
+
+	@Test
+	@DisplayName("reuses scans for unchanged content")
+	void reusesUnchangedScans() throws Exception {
+		Path file = files.resolve("Cached.java");
+		Files.write(file, "package com.example;\nimport java.util.List;\npublic class Cached { }"
+				.getBytes(StandardCharsets.UTF_8));
+
+		ImportScan first = JavaImports.of(file);
+		ImportScan second = JavaImports.of(file);
+
+		assertThat(second).as("same cached instance").isSameAs(first);
+
+		Files.write(file, "package com.example;\nimport java.util.Map;\npublic class Cached { }"
+				.getBytes(StandardCharsets.UTF_8));
+		ImportScan third = JavaImports.of(file);
+
+		assertThat(third).as("changed content reparsed").isNotSameAs(first);
+		assertThat(third.imports()).as("new imports").hasSize(1);
+		assertThat(third.imports().get(0).target()).as("new target").isEqualTo("java.util.Map");
+	}
 }

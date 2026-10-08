@@ -18,11 +18,13 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -38,6 +40,26 @@ final class CheckFileToolTest {
 
 	@TempDir
 	private Path state;
+
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(Path dir) throws IOException {
+		JarIndexStore created = new JarIndexStore(dir);
+		openStores.add(created);
+		return created;
+	}
 
 	@Test
 	@DisplayName("reports missing, policy, and clean")
@@ -62,8 +84,8 @@ final class CheckFileToolTest {
 	}
 
 	@Test
-	@DisplayName("rejects bad arguments")
-	void rejectsBadArguments() {
+	@DisplayName("rejects calls missing the file path")
+	void rejectsMissingFile() {
 		CheckFileTool tool = tool();
 
 		CallToolResult result = tool.call(Map.of("projectPath", project.toString()));
@@ -124,6 +146,8 @@ final class CheckFileToolTest {
 				.as("sub-package keeps the rule alive")
 				.contains("POLICY");
 	}
+	@Test
+	@DisplayName("reports broken files clean and resolver failures as errors")
 	void reportsUnhealthyAndFailures() throws Exception {
 		CheckFileTool tool = tool();
 		Path broken = file("Broken.java",
@@ -173,13 +197,15 @@ final class CheckFileToolTest {
 				.as("own package keeps the rule alive")
 				.contains("POLICY");
 
+		closeStores();
 		try (var indexes = Files.list(state.resolve("index"))) {
 			for (Path db : indexes.filter(p -> p.toString().endsWith(".mv.db")).toList()) {
 				Files.write(db, "corrupt".getBytes(StandardCharsets.UTF_8));
 			}
 		}
+		CheckFileTool reopened = tool();
 		CallToolResult result =
-				tool.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()));
+				reopened.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()));
 
 		assertThat(result.isError()).as("corrupt index flagged").isTrue();
 	}
@@ -201,10 +227,12 @@ final class CheckFileToolTest {
 		try {
 			Path jar = project.resolve("dep.jar");
 			try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
-				zip.putNextEntry(new ZipEntry("META-INF/"));
+				ZipEntry meta = new ZipEntry("META-INF/");
+				meta.setTime(0);
+				zip.putNextEntry(meta);
 				zip.closeEntry();
 			}
-			JarIndexStore store = new JarIndexStore(state.resolve("index"));
+			JarIndexStore store = openStore(state.resolve("index"));
 			LibraryIndexer indexer = jarFile -> List.of(
 					new Symbol("com.fasterxml.jackson.databind.ObjectMapper", SymbolKind.CLASS, null, null, false,
 							"", false),
@@ -218,7 +246,7 @@ final class CheckFileToolTest {
 
 	private CheckFileTool failingTool() {
 		try {
-			JarIndexStore store = new JarIndexStore(state.resolve("failing-index"));
+			JarIndexStore store = openStore(state.resolve("failing-index"));
 			LibraryIndexer indexer = jarFile -> List.of();
 			DependencyResolver resolver = (projectDir, allowNetwork) -> {
 				throw new IOException("no network");

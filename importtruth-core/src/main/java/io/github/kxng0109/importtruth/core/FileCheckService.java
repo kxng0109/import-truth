@@ -59,16 +59,35 @@ public final class FileCheckService {
 	public CheckResult check(Path projectDir, Path file) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(file, "file");
-		ImportScan scan = JavaImports.of(file);
-		if (!scan.healthy()) {
-			return new CheckResult(false, List.of(), List.of());
-		}
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = new ArrayList<>(jars.size());
 		for (Path jar : jars) {
 			dbs.add(store.ensureIndexed(jar, indexer));
 		}
 		Set<String> own = ProjectPackages.of(projectDir);
+		return checkWith(projectDir, file, dbs, own);
+	}
+
+	/**
+	 * Checks one file against already-resolved indexes.
+	 *
+	 * @param projectDir project root, never null
+	 * @param file       source file, never null
+	 * @param dbs        index files, never null
+	 * @param own        own-project packages, never null
+	 * @return the outcome, never null
+	 * @throws IOException when index reads fail
+	 */
+	public CheckResult checkWith(Path projectDir, Path file, List<Path> dbs, Set<String> own)
+			throws IOException {
+		Objects.requireNonNull(projectDir, "projectDir");
+		Objects.requireNonNull(file, "file");
+		Objects.requireNonNull(dbs, "dbs");
+		Objects.requireNonNull(own, "own");
+		ImportScan scan = JavaImports.of(file);
+		if (!scan.healthy()) {
+			return new CheckResult(false, List.of(), List.of());
+		}
 		String display = displayName(projectDir, file);
 		List<Finding> findings = new ArrayList<>();
 		List<ImportVerdict> verdicts = new ArrayList<>();

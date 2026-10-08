@@ -15,7 +15,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -25,10 +27,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * requests for the same library share a single indexing run. Pure Java
  * storage: no native libraries, nothing for application policies to block.
  */
-public final class JarIndexStore {
+public final class JarIndexStore implements AutoCloseable {
 
 	private final Path baseDir;
 	private final ConcurrentHashMap<String, CompletableFuture<Path>> inFlight = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<Path, ShaEntry> shas = new ConcurrentHashMap<>();
+	private final Map<Path, Connection> readers = new HashMap<>();
+	private boolean closed;
 
 	/**
 	 * Creates the store.
@@ -44,6 +49,26 @@ public final class JarIndexStore {
 	}
 
 	/**
+	 * Hashes the jar, reusing the digest while the size and timestamp
+	 * stamp agrees. One small entry per jar path; sessions touch
+	 * dozens of jars, so no eviction is needed.
+	 */
+	private String shaOf(Path jar) throws IOException {
+		Path key = jar.toAbsolutePath().normalize();
+		String stamp = Files.getLastModifiedTime(jar).toMillis() + ":" + Files.size(jar);
+		ShaEntry remembered = shas.get(key);
+		if (remembered != null && remembered.stamp().equals(stamp)) {
+			return remembered.sha();
+		}
+		String sha = Sha256.ofFile(jar);
+		shas.put(key, new ShaEntry(stamp, sha));
+		return sha;
+	}
+
+	private record ShaEntry(String stamp, String sha) {
+	}
+
+	/**
 	 * Returns the index for the library, indexing it first when absent.
 	 *
 	 * @param jar     library file, never null
@@ -54,7 +79,7 @@ public final class JarIndexStore {
 	public Path ensureIndexed(Path jar, LibraryIndexer indexer) throws IOException {
 		Objects.requireNonNull(jar, "jar");
 		Objects.requireNonNull(indexer, "indexer");
-		String sha = Sha256.ofFile(jar);
+		String sha = shaOf(jar);
 		Path target = dbFile(sha);
 		if (Files.exists(target)) {
 			return target;
@@ -93,14 +118,15 @@ public final class JarIndexStore {
 		Objects.requireNonNull(fqn, "fqn");
 		String sql = "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
 				+ " FROM symbols WHERE fqn = ? ORDER BY fqn";
-		try (Connection connection = connectRead(db);
-				PreparedStatement query = connection.prepareStatement(sql)) {
-			query.setString(1, fqn);
-			try (ResultSet rows = query.executeQuery()) {
-				return readAll(rows);
+		synchronized (this) {
+			try (PreparedStatement query = readerFor(db).prepareStatement(sql)) {
+				query.setString(1, fqn);
+				try (ResultSet rows = query.executeQuery()) {
+					return readAll(rows);
+				}
+			} catch (SQLException failure) {
+				throw new IOException("Query failed on " + db, failure);
 			}
-		} catch (SQLException failure) {
-			throw new IOException("Query failed on " + db, failure);
 		}
 	}
 
@@ -139,15 +165,16 @@ public final class JarIndexStore {
 		}
 		String sql = "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
 				+ " FROM symbols WHERE fqn LIKE ? ESCAPE '\\' ORDER BY LENGTH(fqn), fqn LIMIT ?";
-		try (Connection connection = connectRead(db);
-				PreparedStatement statement = connection.prepareStatement(sql)) {
-			statement.setString(1, "%" + escapeLike(query) + "%");
-			statement.setInt(2, limit);
-			try (ResultSet rows = statement.executeQuery()) {
-				return readAll(rows);
+		synchronized (this) {
+			try (PreparedStatement statement = readerFor(db).prepareStatement(sql)) {
+				statement.setString(1, "%" + escapeLike(query) + "%");
+				statement.setInt(2, limit);
+				try (ResultSet rows = statement.executeQuery()) {
+					return readAll(rows);
+				}
+			} catch (SQLException failure) {
+				throw new IOException("Search failed on " + db, failure);
 			}
-		} catch (SQLException failure) {
-			throw new IOException("Search failed on " + db, failure);
 		}
 	}
 
@@ -201,8 +228,8 @@ public final class JarIndexStore {
 	}
 
 	/**
-	 * Atomically publishes a finished temp file, tolerating a concurrent
-	 * writer that already published the same content.
+	 * Publishes a finished temp file. The first publisher wins: same-sha
+	 * content is byte-identical, so a loser must never clobber a winner.
 	 *
 	 * @param tmpFile finished temp file, never null
 	 * @param target  final location, never null
@@ -211,6 +238,10 @@ public final class JarIndexStore {
 	static void publishTmp(Path tmpFile, Path target) throws IOException {
 		Objects.requireNonNull(tmpFile, "tmpFile");
 		Objects.requireNonNull(target, "target");
+		if (Files.exists(target)) {
+			Files.deleteIfExists(tmpFile);
+			return;
+		}
 		try {
 			Files.move(tmpFile, target, StandardCopyOption.ATOMIC_MOVE);
 		} catch (IOException atomic) {
@@ -219,6 +250,38 @@ public final class JarIndexStore {
 				return;
 			}
 			throw atomic;
+		}
+	}
+
+	/**
+	 * Returns the shared read connection for one index file,
+	 * opening it on first use. Callers synchronize on the store.
+	 */
+	private Connection readerFor(Path db) throws SQLException {
+		if (closed) {
+			throw new SQLException("Index store is closed");
+		}
+		Connection reader = readers.get(db);
+		if (reader == null) {
+			reader = connectRead(db);
+			readers.put(db, reader);
+		}
+		return reader;
+	}
+
+	/**
+	 * Closes every shared read connection and releases the index files.
+	 *
+	 * @throws SQLException when a connection cannot close
+	 */
+	@Override
+	public void close() throws SQLException {
+		synchronized (this) {
+			closed = true;
+			for (Connection reader : readers.values()) {
+				reader.close();
+			}
+			readers.clear();
 		}
 	}
 

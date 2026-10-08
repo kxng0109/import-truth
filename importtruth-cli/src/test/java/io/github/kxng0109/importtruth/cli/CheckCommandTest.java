@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
@@ -26,6 +27,7 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.ServiceLoader;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -46,6 +48,26 @@ final class CheckCommandTest {
 
 	@TempDir
 	private Path files;
+
+	private final List<JarIndexStore> openStores = new ArrayList<>();
+
+	@AfterEach
+	void closeStores() {
+		for (JarIndexStore store : openStores) {
+			try {
+				store.close();
+			} catch (Exception ignored) {
+				// Best effort: temp cleanup reclaims the rest.
+			}
+		}
+		openStores.clear();
+	}
+
+	private JarIndexStore openStore(Path dir) throws IOException {
+		JarIndexStore created = new JarIndexStore(dir);
+		openStores.add(created);
+		return created;
+	}
 
 	@Test
 	@Tag("slow")
@@ -95,6 +117,10 @@ final class CheckCommandTest {
 		assertThatThrownBy(() -> command.run(null, System.err, files, file)).as("null out")
 				.isInstanceOf(NullPointerException.class);
 		assertThatThrownBy(() -> command.run(System.out, System.err, null, file)).as("null project")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> command.run(System.out, null, files, file)).as("null err")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> command.run(System.out, System.err, files, null)).as("null file")
 				.isInstanceOf(NullPointerException.class);
 	}
 
@@ -147,8 +173,8 @@ final class CheckCommandTest {
 	}
 
 	@Test
-	@DisplayName("keeps own packages and fails loudly on corrupt indexes")
-	void keepsOwnAndFailsLoudly() throws Exception {
+	@DisplayName("keeps own packages alive")
+	void keepsOwnPackagesAlive() throws Exception {
 		Path own = files.resolve("src/main/java/com/fasterxml/jackson/databind");
 		Files.createDirectories(own);
 		Files.write(own.resolve("Foo.java"),
@@ -163,6 +189,18 @@ final class CheckCommandTest {
 
 		assertThat(out.toString(StandardCharsets.UTF_8)).as("own package keeps the rule").contains("POLICY");
 		assertThat(exit).as("policy exit stays zero").isEqualTo(0);
+	}
+
+	@Test
+	@DisplayName("fails loudly on corrupt indexes")
+	void failsLoudlyOnCorruptIndexes() throws Exception {
+		CheckCommand seed = fakeCommand();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+		ByteArrayOutputStream seedOut = new ByteArrayOutputStream();
+		seed.run(new PrintStream(seedOut, true, StandardCharsets.UTF_8), System.err, files, legacy);
+		closeStores();
 
 		try (var indexes = Files.list(state.resolve("fake-index"))) {
 			for (Path db : indexes.filter(p -> p.toString().endsWith(".mv.db")).toList()) {
@@ -170,9 +208,15 @@ final class CheckCommandTest {
 			}
 		}
 
+		CheckCommand command = fakeCommand();
+		ByteArrayOutputStream err = new ByteArrayOutputStream();
+
 		assertThatThrownBy(() -> command.run(
-				new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8), System.err, files,
+				new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8),
+				new PrintStream(err, true, StandardCharsets.UTF_8), files,
 				legacy)).as("corrupt index throws").isInstanceOf(IOException.class);
+		assertThat(err.toString(StandardCharsets.UTF_8)).as("rules disabled first")
+				.contains("disabled");
 	}
 
 	@Test
@@ -236,7 +280,7 @@ final class CheckCommandTest {
 				zip.closeEntry();
 			}
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("fake-index"));
+		JarIndexStore store = openStore(state.resolve("fake-index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.fasterxml.jackson.databind.ObjectMapper", SymbolKind.CLASS, null, null, false,
 						"", false),
@@ -254,7 +298,7 @@ final class CheckCommandTest {
 				zip.closeEntry();
 			}
 		}
-		JarIndexStore store = new JarIndexStore(state.resolve("empty-index"));
+		JarIndexStore store = openStore(state.resolve("empty-index"));
 		LibraryIndexer indexer = jarFile -> List.of(
 				new Symbol("com.example.Unrelated", SymbolKind.CLASS, null, null, false, "", false));
 		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
@@ -262,7 +306,7 @@ final class CheckCommandTest {
 	}
 
 	private CheckCommand command() throws Exception {
-		JarIndexStore store = new JarIndexStore(state.resolve("index"));
+		JarIndexStore store = openStore(state.resolve("index"));
 		LibraryIndexer indexer = ServiceLoader.load(LibraryIndexer.class).findFirst().orElseThrow(
 				() -> new IllegalStateException("No LibraryIndexer on the test classpath"));
 		DependencyResolver resolver = new MavenResolver(state);

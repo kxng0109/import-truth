@@ -14,6 +14,7 @@ import io.github.kxng0109.importtruth.model.PolicyHit;
 import io.github.kxng0109.importtruth.model.PolicyPack;
 import io.github.kxng0109.importtruth.model.PolicyRule;
 import io.github.kxng0109.importtruth.policy.PackLoader;
+import io.github.kxng0109.importtruth.policy.PolicyCache;
 import io.github.kxng0109.importtruth.policy.PolicyEngine;
 import io.github.kxng0109.importtruth.policy.PolicyValidator;
 
@@ -38,6 +39,7 @@ public final class CheckCommand {
 	private final LibraryIndexer indexer;
 	private final DependencyResolver resolver;
 	private final JdkIndex jdk;
+	private final PolicyCache engines = new PolicyCache();
 
 	/**
 	 * Creates the command.
@@ -111,19 +113,37 @@ public final class CheckCommand {
 				pack = PackLoader.load("jackson3", in);
 			}
 		}
+		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = new ArrayList<>();
-		for (Path jar : resolver.resolve(projectDir, false)) {
+		for (Path jar : jars) {
 			dbs.add(store.ensureIndexed(jar, indexer));
 		}
 		Set<String> own = ProjectPackages.of(projectDir);
-		List<PolicyRule> active = PolicyValidator.activeRules(
-				pack,
-				name -> packageResolves(dbs, own, name),
-				name -> typeResolves(dbs, name));
-		if (active.size() != pack.rules().size()) {
-			err.println("policy: " + (pack.rules().size() - active.size()) + " rule(s) disabled, targets missing");
+		return engines.engine(pack, scopeKey(jars, dbs, own), validated -> {
+			List<PolicyRule> active = PolicyValidator.activeRules(
+					validated,
+					name -> packageResolves(dbs, own, name),
+					name -> typeResolves(dbs, name));
+			if (active.size() != validated.rules().size()) {
+				err.println("policy: " + (validated.rules().size() - active.size())
+						+ " rule(s) disabled, targets missing");
+			}
+			return active;
+		});
+	}
+
+	/**
+	 * Keys one validation: jar identities, index files, own packages,
+	 * and the running JDK. Any change revalidates.
+	 */
+	private static String scopeKey(List<Path> jars, List<Path> dbs, Set<String> own) throws IOException {
+		StringBuilder key = new StringBuilder();
+		for (Path jar : jars) {
+			key.append(jar.toAbsolutePath()).append(':')
+					.append(Files.getLastModifiedTime(jar).toMillis()).append(':')
+					.append(Files.size(jar)).append('\n');
 		}
-		return new PolicyEngine(new PolicyPack(pack.name(), active));
+		return key.toString();
 	}
 
 	private boolean typeResolves(List<Path> dbs, String name) {

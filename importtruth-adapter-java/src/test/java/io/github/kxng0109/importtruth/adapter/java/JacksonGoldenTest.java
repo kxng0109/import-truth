@@ -58,9 +58,14 @@ final class JacksonGoldenTest {
 								.count())
 				.as("retained annotation present")
 				.isEqualTo(1L);
-		assertThat(symbols.stream().allMatch(s -> s.kind() != null))
-				.as("every symbol has a kind")
-				.isTrue();
+		assertThat(symbols).as("symbols recorded").isNotEmpty();
+		assertThat(symbols.stream()
+						.filter(s -> s.fqn().equals("com.fasterxml.jackson.annotation.JsonProperty"))
+						.findFirst()
+						.orElseThrow(() -> new AssertionError("Missing annotation"))
+						.kind())
+				.as("annotation kind recorded")
+				.isEqualTo(SymbolKind.ANNOTATION);
 		assertThat(symbols.stream().anyMatch(s -> s.kind() == SymbolKind.CLASS))
 				.as("annotation types recorded")
 				.isTrue();

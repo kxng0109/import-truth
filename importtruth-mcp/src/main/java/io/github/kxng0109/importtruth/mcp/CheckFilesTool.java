@@ -63,12 +63,19 @@ public final class CheckFilesTool {
 										"filePaths", Map.of("type", "array", "items", Map.of("type", "string"))),
 								"required",
 								List.of("projectPath", "filePaths")))
-				.description("Checks many Java files' imports against the resolved classpath in one call.")
+				.description("Checks many Java files' imports against the resolved classpath in one call."
+						+ " One resolver, index, or pack failure fails the whole call with isError=true;"
+						+ " invalid items become inline ERROR lines"
+						+ " (an all-invalid list returns success carrying only ERROR lines);"
+						+ " clean files render as \"clean: <path>\".")
 				.build();
 	}
 
 	/**
-	 * Handles a batch check call.
+	 * Handles a batch check call. One resolver, index, or pack failure fails
+	 * the whole call with {@code isError=true}; invalid items become inline
+	 * {@code ERROR} lines, so an all-invalid list returns success carrying
+	 * only {@code ERROR} lines. Clean files render as {@code "clean: <path>"}.
 	 *
 	 * @param arguments tool arguments, never null
 	 * @return successful result with one block per file, or an error result

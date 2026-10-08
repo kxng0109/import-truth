@@ -5,6 +5,7 @@ import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,7 +17,22 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class JdkIndex {
 
 	private final Map<String, Boolean> cache = new ConcurrentHashMap<>();
+	private final Map<String, Boolean> packageCache = new ConcurrentHashMap<>();
+	private final List<Path> modules;
 	private final String jdkVersion = System.getProperty("java.version", "unknown");
+
+	/**
+	 * Creates the index, listing the runtime image modules once.
+	 */
+	public JdkIndex() {
+		List<Path> listed;
+		try (var entries = Files.list(FileSystems.getFileSystem(URI.create("jrt:/")).getPath("/modules"))) {
+			listed = entries.toList();
+		} catch (Exception missing) {
+			listed = List.of();
+		}
+		this.modules = listed;
+	}
 
 	/**
 	 * Returns the running JDK version that backs these answers.
@@ -40,29 +56,32 @@ public final class JdkIndex {
 	}
 
 	private boolean probe(String fqn) {
-		FileSystem image = FileSystems.getFileSystem(URI.create("jrt:/"));
 		String dotted = fqn.replace('.', '/') + ".class";
-		if (modulesContain(image, dotted)) {
+		if (contains(dotted)) {
 			return true;
 		}
 		String nested = dotted.substring(0, dotted.length() - ".class".length());
 		int slash;
 		while ((slash = nested.lastIndexOf('/')) > 0) {
 			nested = nested.substring(0, slash) + "$" + nested.substring(slash + 1);
-			if (modulesContain(image, nested + ".class")) {
+			if (contains(nested + ".class")) {
 				return true;
 			}
 		}
 		return false;
 	}
 
-	private static boolean modulesContain(FileSystem image, String member) {
-		Path modules = image.getPath("/modules");
-		try (var entries = Files.list(modules)) {
-			return entries.anyMatch(module -> Files.exists(module.resolve(member)));
-		} catch (Exception missing) {
-			return false;
+	private boolean contains(String member) {
+		for (Path module : modules) {
+			try {
+				if (Files.exists(module.resolve(member))) {
+					return true;
+				}
+			} catch (Exception missing) {
+				// Unreadable module: treated as absent, like a missing entry.
+			}
 		}
+		return false;
 	}
 
 	/**
@@ -74,12 +93,20 @@ public final class JdkIndex {
 	 */
 	public boolean packageExists(String name) {
 		Objects.requireNonNull(name, "name");
+		return packageCache.computeIfAbsent(name, this::probePackage);
+	}
+
+	private boolean probePackage(String name) {
 		String path = name.replace('.', '/');
-		FileSystem image = FileSystems.getFileSystem(URI.create("jrt:/"));
-		try (var entries = Files.list(image.getPath("/modules"))) {
-			return entries.anyMatch(module -> Files.isDirectory(module.resolve(path)));
-		} catch (Exception missing) {
-			return false;
+		for (Path module : modules) {
+			try {
+				if (Files.isDirectory(module.resolve(path))) {
+					return true;
+				}
+			} catch (Exception missing) {
+				// Unreadable module: treated as absent, like a missing entry.
+			}
 		}
+		return false;
 	}
 }

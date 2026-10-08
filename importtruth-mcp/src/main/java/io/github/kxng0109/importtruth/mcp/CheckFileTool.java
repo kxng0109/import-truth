@@ -14,6 +14,7 @@ import io.github.kxng0109.importtruth.model.PolicyHit;
 import io.github.kxng0109.importtruth.model.PolicyPack;
 import io.github.kxng0109.importtruth.model.PolicyRule;
 import io.github.kxng0109.importtruth.policy.PackLoader;
+import io.github.kxng0109.importtruth.policy.PolicyCache;
 import io.github.kxng0109.importtruth.policy.PolicyEngine;
 import io.github.kxng0109.importtruth.policy.PolicyValidator;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -46,6 +47,7 @@ public final class CheckFileTool {
 	private final LibraryIndexer indexer;
 	private final DependencyResolver resolver;
 	private final JdkIndex jdk;
+	private final PolicyCache engines = new PolicyCache();
 
 	/**
 	 * Creates the tool.
@@ -115,7 +117,8 @@ public final class CheckFileTool {
 	}
 
 	/**
-	 * Checks many files sharing one resolution and one policy load.
+	 * Checks many files sharing one resolution, one index pass,
+	 * and one policy load. Unhealthy files yield no lines.
 	 *
 	 * @param projectDir project root, never null
 	 * @param files      source files, never null
@@ -124,17 +127,29 @@ public final class CheckFileTool {
 	 */
 	Map<Path, List<String>> checkFiles(Path projectDir, List<Path> files) throws IOException {
 		FileCheckService check = new FileCheckService(store, indexer, resolver, jdk);
-		PolicyEngine policy = loadPack(projectDir);
+		List<Path> jars = resolver.resolve(projectDir, false);
+		List<Path> dbs = new ArrayList<>(jars.size());
+		for (Path jar : jars) {
+			dbs.add(store.ensureIndexed(jar, indexer));
+		}
+		Set<String> own = ProjectPackages.of(projectDir);
+		PolicyEngine policy = loadPack(projectDir, jars, dbs, own);
 		Map<Path, List<String>> answers = new LinkedHashMap<>();
 		for (Path file : files) {
-			answers.put(file, checkOne(check, policy, projectDir, file));
+			answers.put(file, checkOne(check, policy, projectDir, file, dbs, own));
 		}
 		return answers;
 	}
 
 	private List<String> checkOne(
-			FileCheckService check, PolicyEngine policy, Path projectDir, Path file) throws IOException {
-		CheckResult result = check.check(projectDir, file);
+			FileCheckService check,
+			PolicyEngine policy,
+			Path projectDir,
+			Path file,
+			List<Path> dbs,
+			Set<String> own)
+			throws IOException {
+		CheckResult result = check.checkWith(projectDir, file, dbs, own);
 		List<Finding> findings = new ArrayList<>(result.findings());
 		if (result.healthy()) {
 			for (ImportVerdict verdict : result.verdicts()) {
@@ -161,7 +176,8 @@ public final class CheckFileTool {
 		return lines;
 	}
 
-	private PolicyEngine loadPack(Path projectDir) throws IOException {
+	private PolicyEngine loadPack(Path projectDir, List<Path> jars, List<Path> dbs, Set<String> own)
+			throws IOException {
 		Path override = projectDir.resolve(".importtruth.yml");
 		PolicyPack pack;
 		if (Files.exists(override)) {
@@ -173,16 +189,31 @@ public final class CheckFileTool {
 				pack = PackLoader.load("jackson3", in);
 			}
 		}
-		List<Path> dbs = new ArrayList<>();
-		for (Path jar : resolver.resolve(projectDir, false)) {
-			dbs.add(store.ensureIndexed(jar, indexer));
-		}
-		Set<String> own = ProjectPackages.of(projectDir);
-		List<PolicyRule> active = PolicyValidator.activeRules(
-				pack,
+		return engines.engine(pack, scopeKey(jars, dbs, own), validated -> PolicyValidator.activeRules(
+				validated,
 				name -> packageResolves(dbs, own, name),
-				name -> typeResolves(dbs, name));
-		return new PolicyEngine(new PolicyPack(pack.name(), active));
+				name -> typeResolves(dbs, name)));
+	}
+
+	/**
+	 * Keys one validation: jar identities, index files, own packages,
+	 * and the running JDK. Any change revalidates.
+	 */
+	private static String scopeKey(List<Path> jars, List<Path> dbs, Set<String> own) throws IOException {
+		StringBuilder key = new StringBuilder();
+		for (Path jar : jars) {
+			key.append(jar.toAbsolutePath()).append(':')
+					.append(Files.getLastModifiedTime(jar).toMillis()).append(':')
+					.append(Files.size(jar)).append('\n');
+		}
+		key.append("dbs=");
+		for (Path db : dbs) {
+			key.append(db.toAbsolutePath()).append(';');
+		}
+		key.append("\nown=");
+		own.stream().sorted().forEach(pkg -> key.append(pkg).append(';'));
+		key.append("\njdk=").append(System.getProperty("java.version", ""));
+		return key.toString();
 	}
 
 	private boolean typeResolves(List<Path> dbs, String name) {

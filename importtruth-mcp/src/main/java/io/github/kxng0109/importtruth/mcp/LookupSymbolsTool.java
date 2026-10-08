@@ -50,12 +50,18 @@ public final class LookupSymbolsTool {
 										"symbols", Map.of("type", "array", "items", Map.of("type", "string"))),
 								"required",
 								List.of("projectPath", "symbols")))
-				.description("Checks many fully qualified names against the project classpath in one call.")
+				.description("Checks many fully qualified names against the project classpath in one call."
+						+ " Resolver failures stay per symbol as ERROR lines in a success result;"
+						+ " oversize, blank, or invalid batches fail the whole call;"
+						+ " success lines match the single-symbol tool exactly.")
 				.build();
 	}
 
 	/**
-	 * Handles a batch lookup call.
+	 * Handles a batch lookup call. Resolver failures stay per symbol as
+	 * {@code ERROR} lines in a success result, while oversize, blank, or
+	 * invalid batches fail the whole call. Success lines match the
+	 * single-symbol tool exactly.
 	 *
 	 * @param arguments tool arguments, never null
 	 * @return successful result with one block per symbol, or an error result
