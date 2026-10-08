@@ -192,7 +192,7 @@ final class MavenResolverTest {
 						.getBytes(StandardCharsets.UTF_8));
 		MavenResolver resolver = new MavenResolver(state);
 
-		assertThat(resolver.resolve(bare, false)).as("empty union").isEmpty();
+		assertThat(resolver.resolve(bare, true)).as("empty union").isEmpty();
 	}
 
 	@Test
@@ -362,7 +362,7 @@ final class MavenResolverTest {
 							.getBytes(StandardCharsets.UTF_8));
 			MavenResolver resolver = new MavenResolver(state);
 
-			List<Path> first = resolver.resolve(root, false);
+			List<Path> first = resolver.resolve(root, true);
 			Files.write(lib.resolve("pom.xml"),
 					("<project><modelVersion>4.0.0</modelVersion><parent><groupId>t</groupId>"
 							+ "<artifactId>changing</artifactId><version>1</version></parent>"
@@ -371,7 +371,7 @@ final class MavenResolverTest {
 							+ "<artifactId>junit-jupiter-api</artifactId><version>6.1.3</version>"
 							+ "<scope>test</scope></dependency></dependencies></project>")
 							.getBytes(StandardCharsets.UTF_8));
-			List<Path> second = resolver.resolve(root, false);
+			List<Path> second = resolver.resolve(root, true);
 
 			assertThat(second).as("recomputed union matches").isEqualTo(first);
 			assertThat(second).as("recomputed instance differs").isNotSameAs(first);
@@ -407,8 +407,8 @@ final class MavenResolverTest {
 							+ "<scope>test</scope></dependency></dependencies></project>")
 							.getBytes(StandardCharsets.UTF_8));
 
-			List<Path> first = new MavenResolver(state).resolve(root, false);
-			List<Path> second = new MavenResolver(state).resolve(root, false);
+			List<Path> first = new MavenResolver(state).resolve(root, true);
+			List<Path> second = new MavenResolver(state).resolve(root, true);
 
 			assertThat(first).as("resolved jars").isNotEmpty();
 			assertThat(second).as("disk hit matches").isEqualTo(first);
