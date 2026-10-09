@@ -36,26 +36,8 @@ public final class Suggestions {
 	 */
 	public static List<String> collect(
 			JarIndexStore store, List<Path> dbs, String want, int collected, int limit) throws IOException {
-		Objects.requireNonNull(store, "store");
-		Objects.requireNonNull(dbs, "dbs");
-		Objects.requireNonNull(want, "want");
-		if (collected <= 0 || limit <= 0) {
-			throw new IllegalArgumentException("collected and limit must be positive");
-		}
-		String simple = Packages.simpleName(want);
-		Set<String> names = new LinkedHashSet<>();
-		for (Path db : dbs) {
-			for (Symbol match : store.searchIn(db, simple, collected)) {
-				names.add(match.fqn());
-				if (names.size() >= collected) {
-					break;
-				}
-			}
-			if (names.size() >= collected) {
-				break;
-			}
-		}
-		return rank(want, names, limit);
+		validate(store, dbs, want, collected, limit);
+		return rank(want, sweep(store, dbs, Packages.simpleName(want), collected, false), limit);
 	}
 
 	/**
@@ -72,16 +54,42 @@ public final class Suggestions {
 	 */
 	public static List<String> collectInsensitive(
 			JarIndexStore store, List<Path> dbs, String want, int collected, int limit) throws IOException {
+		validate(store, dbs, want, collected, limit);
+		return rank(want, sweep(store, dbs, Packages.simpleName(want), collected, true), limit);
+	}
+
+	/**
+	 * Sweeps indexes once for one simple name, gathering candidate
+	 * names without ranking. Shared by batches whose misses reduce
+	 * to the same simple name. Databases whose every name segment
+	 * misses the simple name are skipped without a scan.
+	 *
+	 * @param store index store, never null
+	 * @param dbs index files, never null
+	 * @param simple simple name to find, never null
+	 * @param collected maximum candidates gathered, positive
+	 * @param insensitive true for case insensitive matching
+	 * @return candidate names in index order, never null
+	 * @throws IOException when index reads fail
+	 */
+	public static Set<String> sweep(
+			JarIndexStore store, List<Path> dbs, String simple, int collected, boolean insensitive)
+			throws IOException {
 		Objects.requireNonNull(store, "store");
 		Objects.requireNonNull(dbs, "dbs");
-		Objects.requireNonNull(want, "want");
-		if (collected <= 0 || limit <= 0) {
-			throw new IllegalArgumentException("collected and limit must be positive");
+		Objects.requireNonNull(simple, "simple");
+		if (collected <= 0) {
+			throw new IllegalArgumentException("collected must be positive");
 		}
-		String simple = Packages.simpleName(want);
 		Set<String> names = new LinkedHashSet<>();
 		for (Path db : dbs) {
-			for (Symbol match : store.searchInInsensitive(db, simple, collected)) {
+			if (!store.maybeMatches(db, simple, insensitive)) {
+				continue;
+			}
+			List<Symbol> matches = insensitive
+					? store.searchInInsensitive(db, simple, collected)
+					: store.searchIn(db, simple, collected);
+			for (Symbol match : matches) {
 				names.add(match.fqn());
 				if (names.size() >= collected) {
 					break;
@@ -91,7 +99,17 @@ public final class Suggestions {
 				break;
 			}
 		}
-		return rank(want, names, limit);
+		return names;
+	}
+
+	private static void validate(
+			JarIndexStore store, List<Path> dbs, String want, int collected, int limit) {
+		Objects.requireNonNull(store, "store");
+		Objects.requireNonNull(dbs, "dbs");
+		Objects.requireNonNull(want, "want");
+		if (collected <= 0 || limit <= 0) {
+			throw new IllegalArgumentException("collected and limit must be positive");
+		}
 	}
 
 	/**
@@ -121,14 +139,18 @@ public final class Suggestions {
 			if (candidate == null || !seen.add(candidate)) {
 				continue;
 			}
-			if (Packages.simpleName(candidate).equals(wantSimple)) {
+			String candidateSimple = Packages.simpleName(candidate);
+			if (candidateSimple.equals(wantSimple)) {
 				exact.add(candidate);
 			} else if (!wantPackage.isEmpty() && candidate.startsWith(wantPackage + ".")) {
 				packaged.add(candidate);
-			} else if (distance(wantSimple, Packages.simpleName(candidate), 2) <= 2) {
-				fuzzy.add(new Scored(candidate, distance(wantSimple, Packages.simpleName(candidate), 2)));
 			} else {
-				tail.add(candidate);
+				int scored = distance(wantSimple, candidateSimple, 2);
+				if (scored <= 2) {
+					fuzzy.add(new Scored(candidate, scored));
+				} else {
+					tail.add(candidate);
+				}
 			}
 		}
 		fuzzy.sort(Comparator.comparingInt(Scored::distance).thenComparing(Scored::name));
@@ -144,6 +166,7 @@ public final class Suggestions {
 	/**
 	 * Optimal-string-alignment distance with early exit past
 	 * {@code threshold}. Transpositions count as one edit.
+	 * Rolling rows keep memory linear in the shorter name.
 	 */
 	static int distance(String first, String second, int threshold) {
 		int left = first.length();
@@ -151,33 +174,45 @@ public final class Suggestions {
 		if (Math.abs(left - right) > threshold) {
 			return threshold + 1;
 		}
-		int[][] table = new int[left + 1][right + 1];
-		for (int i = 0; i <= left; i++) {
-			table[i][0] = i;
+		if (right > left) {
+			String swapped = first;
+			first = second;
+			second = swapped;
+			int swappedLength = left;
+			left = right;
+			right = swappedLength;
 		}
+		int[] twoAgo = new int[right + 1];
+		int[] oneAgo = new int[right + 1];
+		int[] current = new int[right + 1];
 		for (int j = 0; j <= right; j++) {
-			table[0][j] = j;
+			oneAgo[j] = j;
 		}
 		for (int i = 1; i <= left; i++) {
+			current[0] = i;
 			int rowBest = threshold + 1;
 			for (int j = 1; j <= right; j++) {
 				int cost = first.charAt(i - 1) == second.charAt(j - 1) ? 0 : 1;
 				int value = Math.min(
-						Math.min(table[i - 1][j] + 1, table[i][j - 1] + 1), table[i - 1][j - 1] + cost);
+						Math.min(oneAgo[j] + 1, current[j - 1] + 1), oneAgo[j - 1] + cost);
 				if (i > 1
 						&& j > 1
 						&& first.charAt(i - 1) == second.charAt(j - 2)
 						&& first.charAt(i - 2) == second.charAt(j - 1)) {
-					value = Math.min(value, table[i - 2][j - 2] + 1);
+					value = Math.min(value, twoAgo[j - 2] + 1);
 				}
-				table[i][j] = value;
+				current[j] = value;
 				rowBest = Math.min(rowBest, value);
 			}
 			if (rowBest > threshold) {
 				return threshold + 1;
 			}
+			int[] rotation = twoAgo;
+			twoAgo = oneAgo;
+			oneAgo = current;
+			current = rotation;
 		}
-		return table[left][right];
+		return oneAgo[right];
 	}
 
 	private record Scored(String name, int distance) {

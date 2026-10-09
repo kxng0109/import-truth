@@ -31,7 +31,12 @@ public final class Sha256 {
 		MessageDigest digest = digest();
 		try (InputStream in = Files.newInputStream(file);
 				DigestInputStream hashed = new DigestInputStream(in, digest)) {
-			hashed.readAllBytes();
+			// Fixed buffer: the digest is identical, the heap stays flat
+			// no matter how large the file grows.
+			byte[] chunk = new byte[65536];
+			while (hashed.read(chunk) != -1) {
+				// Digest updates inside the stream; bytes are discarded.
+			}
 		}
 		return HexFormat.of().formatHex(digest.digest());
 	}

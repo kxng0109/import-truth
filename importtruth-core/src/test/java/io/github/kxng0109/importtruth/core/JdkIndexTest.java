@@ -32,6 +32,18 @@ final class JdkIndexTest {
 	}
 
 	@Test
+	@DisplayName("evicts eldest probes under typo storms")
+	void evictsEldestProbes() {
+		JdkIndex index = new JdkIndex();
+		for (int i = 0; i < 4100; i++) {
+			assertThat(index.exists("com.example.Nope" + i)).as("typo miss").isFalse();
+		}
+
+		assertThat(index.exists("com.example.Nope0")).as("evicted re-probe agrees").isFalse();
+		assertThat(index.exists("java.util.ArrayList")).as("true survives").isTrue();
+	}
+
+	@Test
 	@DisplayName("reports its own version")
 	void reportsVersion() {
 		assertThat(jdk.jdkVersion()).as("JDK version recorded").isNotBlank();

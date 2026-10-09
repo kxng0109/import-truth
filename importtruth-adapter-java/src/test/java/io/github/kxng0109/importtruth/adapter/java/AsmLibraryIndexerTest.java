@@ -80,6 +80,23 @@ final class AsmLibraryIndexerTest {
 				.orElseThrow(() -> new AssertionError("Missing symbol: " + fqn));
 	}
 
+	@Test
+	@DisplayName("skips oversized entries before allocating")
+	void skipsOversizedEntries() throws Exception {
+		Path jar = work.resolve("heavy.jar");
+		byte[] heavy = new byte[AsmLibraryIndexer.MAX_CLASS_BYTES + 1024];
+		try (OutputStream out = Files.newOutputStream(jar);
+				JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new JarEntry("com/example/Heavy.class"));
+			zip.write(heavy);
+			zip.closeEntry();
+		}
+
+		List<Symbol> symbols = new AsmLibraryIndexer().index(jar);
+
+		assertThat(symbols).as("oversized entry skipped").isEmpty();
+	}
+
 	private Path jarOf(Map<String, String> sources) throws Exception {
 		Path classes = work.resolve("classes");
 		Files.createDirectories(classes);

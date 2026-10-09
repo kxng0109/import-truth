@@ -5,7 +5,9 @@ import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -19,12 +21,29 @@ import java.util.zip.ZipFile;
  */
 public final class JdkIndex {
 
-	private final Map<String, Boolean> cache = new ConcurrentHashMap<>();
-	private final Map<String, Boolean> packageCache = new ConcurrentHashMap<>();
+	private final Map<String, Boolean> cache = bounded(4096);
+	private final Map<String, Boolean> packageCache = bounded(4096);
 	private final Map<Integer, ReleaseIndex> releases = new ConcurrentHashMap<>();
 	private final List<Path> modules;
 	private final String jdkVersion = System.getProperty("java.version", "unknown");
 	private final int runningRelease = Runtime.version().feature();
+
+	/**
+	 * Creates a least recently used cache: typo storms evict eldest
+	 * entries instead of growing without bound. Hits are stable truths
+	 * of the running JDK; misses re-probe cheaply after eviction.
+	 *
+	 * @param bound maximum entries, positive
+	 * @return synchronized LRU map, never null
+	 */
+	private static Map<String, Boolean> bounded(int bound) {
+		return Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+			@Override
+			protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+				return size() > bound;
+			}
+		});
+	}
 
 	/**
 	 * Creates the index, listing the runtime image modules once.

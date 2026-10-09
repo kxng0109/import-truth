@@ -14,11 +14,12 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
@@ -34,10 +35,18 @@ import javax.tools.ToolProvider;
 public final class JavaImports {
 
 	/**
-	 * Parsed scans by file plus the exact content parsed. Entries are
-	 * small source texts, one per distinct file checked in the session.
+	 * Parsed scans by file plus the exact content parsed. Bounded least
+	 * recently used retention: file sweeps evict eldest entries instead
+	 * of pinning every source text for the process lifetime.
 	 */
-	private static final Map<Path, Entry> CACHE = new ConcurrentHashMap<>();
+	private static final int MAX_FILES = 256;
+	private static final Map<Path, Entry> CACHE =
+			Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+				@Override
+				protected boolean removeEldestEntry(Map.Entry<Path, JavaImports.Entry> eldest) {
+					return size() > MAX_FILES;
+				}
+			});
 
 	private JavaImports() {
 	}

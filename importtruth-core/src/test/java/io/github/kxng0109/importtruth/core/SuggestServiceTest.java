@@ -84,6 +84,34 @@ final class SuggestServiceTest {
 	}
 
 	@Test
+	@DisplayName("matches single suggests for retry spellings")
+	void matchesSingleSuggests() throws Exception {
+		Services services = services();
+		List<String> retry = List.of("com.example.Widget", "com.example.Widget[]",
+				"com.example.Widget<String>", "org.example.Nope");
+
+		Map<String, List<String>> answers = services.suggest().suggestBatch(project, retry, 5);
+
+		for (String name : retry) {
+			assertThat(answers.get(name)).as("batch matches single for " + name)
+					.isEqualTo(services.suggest().suggest(project, name, 5));
+		}
+	}
+
+	@Test
+	@DisplayName("rejects bad single inputs")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsBadSingle() throws Exception {
+		Services services = services();
+
+		assertThat(services.suggest().suggest(project, " ", 5)).as("blank stays empty").isEmpty();
+		assertThat(services.suggest().suggest(project, "<T>", 5)).as("bare stays empty").isEmpty();
+		assertThatThrownBy(() -> services.suggest().suggest(project, null, 5))
+				.as("null name rejection")
+				.isInstanceOf(NullPointerException.class);
+	}
+
+	@Test
 	@DisplayName("rejects nulls and non-positive limits")
 	@SuppressWarnings("DataFlowIssue")
 	void rejectsBadInput() throws Exception {

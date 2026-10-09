@@ -17,6 +17,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
@@ -123,6 +125,82 @@ final class LookupSearchTest {
 				.contains("com.example.Widget", "com.example.WidgetInfo");
 	}
 
+	@Test
+	@DisplayName("batches lookups with one shared resolve")
+	void batchesWithSharedResolve() throws Exception {
+		Path jar = project.resolve("dep.jar");
+		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new ZipEntry("META-INF/"));
+			zip.closeEntry();
+		}
+		JarIndexStore store = openStore(state.resolve("batch-index"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
+		AtomicInteger resolves = new AtomicInteger();
+		DependencyResolver resolver = (projectDir, allowNetwork) -> {
+			resolves.incrementAndGet();
+			return List.of(jar);
+		};
+		LookupService lookup = new LookupService(store, indexer, resolver, new JdkIndex());
+
+		List<String> wanted = new ArrayList<>(
+				List.of("com.example.Widget", "org.example.Widget", "org.example.Nope", " ", "java.util.ArrayList",
+						"<T>"));
+		wanted.add(null);
+		Map<String, LookupResult> answers = lookup.lookupBatch(project, wanted);
+
+		assertThat(resolves.get()).as("single resolve").isEqualTo(1);
+		assertThat(answers.get("com.example.Widget").found()).as("hit found").isTrue();
+		assertThat(answers.get("org.example.Widget").found()).as("wrong package miss").isFalse();
+		assertThat(answers.get("org.example.Widget").suggestions()).as("miss suggests neighbor")
+				.contains("com.example.Widget");
+		assertThat(answers.get("org.example.Nope").found()).as("unknown miss").isFalse();
+		assertThat(answers.get(" ").found()).as("blank miss").isFalse();
+		assertThat(answers.get("<T>").found()).as("bare type variable miss").isFalse();
+		assertThat(answers.get(null).found()).as("null miss").isFalse();
+		assertThat(answers.get("java.util.ArrayList").fromJdk()).as("JDK flagged").isTrue();
+		assertThat(lookup.lookup(project, "com.example.Widget"))
+				.as("batch matches single")
+				.isEqualTo(answers.get("com.example.Widget"));
+		assertThat(lookup.lookup(project, "org.example.Widget"))
+				.as("batch miss matches single miss")
+				.isEqualTo(answers.get("org.example.Widget"));
+	}
+
+	@Test
+	@DisplayName("covers targeted JDK paths in batches")
+	void batchesTargetedJdk() throws Exception {
+		Services services = services();
+		Files.write(project.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>targeted</artifactId><version>1</version><properties>"
+						+ "<maven.compiler.release>21</maven.compiler.release></properties></project>")
+						.getBytes(StandardCharsets.UTF_8));
+
+		Map<String, LookupResult> answers = services.lookup().lookupBatch(project,
+				List.of("java.util.ArrayList", "org.example.Widget"));
+
+		assertThat(answers.get("java.util.ArrayList").fromJdk()).as("targeted JDK hit").isTrue();
+		assertThat(answers.get("org.example.Widget").suggestions()).as("targeted miss suggests")
+				.contains("com.example.Widget");
+		assertThat(services.lookup().lookup(project, "java.util.ArrayList").fromJdk())
+				.as("single targeted hit")
+				.isTrue();
+	}
+
+	@Test
+	@DisplayName("rejects null batch inputs")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullBatch() throws Exception {
+		Services services = services();
+
+		assertThatThrownBy(() -> services.lookup().lookupBatch(null, List.of("a.B")))
+				.as("null project rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> services.lookup().lookupBatch(project, null))
+				.as("null symbols rejection")
+				.isInstanceOf(NullPointerException.class);
+	}
 	@Test
 	@DisplayName("search caps rows")
 	void searchCapsRows() throws Exception {

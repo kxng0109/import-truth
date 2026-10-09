@@ -54,6 +54,20 @@ final class JavaImportsTest {
 	}
 
 	@Test
+	@DisplayName("evicts eldest file scans when full")
+	void evictsEldestFiles() throws Exception {
+		for (int i = 0; i < 257; i++) {
+			Path file = files.resolve("File" + i + ".java");
+			Files.write(file, ("package com.example; import java.util.List; public class File" + i + " { }")
+					.getBytes(StandardCharsets.UTF_8));
+			assertThat(JavaImports.of(file).healthy()).as("file parsed").isTrue();
+		}
+
+		Path first = files.resolve("File0.java");
+		assertThat(JavaImports.of(first).healthy()).as("evicted file re-parses").isTrue();
+	}
+
+	@Test
 	@DisplayName("marks directories unhealthy")
 	void marksDirectoriesUnhealthy() {
 		ImportScan scan = JavaImports.of(files);

@@ -108,12 +108,22 @@ public final class FileCheckService {
 		if (ref.wildcard()) {
 			return checkWildcard(dbs, own, display, ref, verdicts, target);
 		}
-		boolean jdkHit = target >= 0 ? jdk.existsIn(ref.target(), target) : jdk.exists(ref.target());
-		if (!store.findAcross(dbs, ref.target()).isEmpty() || jdkHit) {
-			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
-			return Optional.empty();
+		// JDK names never live in dependency indexes: a JDK hit ends
+		// the lookup without touching H2 at all.
+		if (ref.target().startsWith("java.")) {
+			boolean jdkHit = target >= 0 ? jdk.existsIn(ref.target(), target) : jdk.exists(ref.target());
+			verdicts.add(new ImportVerdict(ref.target(), ref.line(), jdkHit));
+			if (jdkHit) {
+				return Optional.empty();
+			}
+		} else {
+			boolean jdkHit = target >= 0 ? jdk.existsIn(ref.target(), target) : jdk.exists(ref.target());
+			if (!store.findAcross(dbs, ref.target()).isEmpty() || jdkHit) {
+				verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
+				return Optional.empty();
+			}
+			verdicts.add(new ImportVerdict(ref.target(), ref.line(), false));
 		}
-		verdicts.add(new ImportVerdict(ref.target(), ref.line(), false));
 		if (isOwnOrGenerated(own, ref.target())) {
 			return Optional.of(candidate(display, ref, "project-owned or generated, unverified"));
 		}
@@ -151,7 +161,7 @@ public final class FileCheckService {
 			}
 		}
 		for (Path db : dbs) {
-			if (!store.searchIn(db, name + ".", 1).isEmpty()) {
+			if (!store.searchPrefix(db, name + ".", 1).isEmpty()) {
 				return true;
 			}
 		}

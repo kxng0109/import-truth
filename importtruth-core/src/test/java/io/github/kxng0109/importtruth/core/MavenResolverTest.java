@@ -28,11 +28,14 @@ import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 
 /**
  * Resolves this very repository offline: no fixtures, real Maven, real cache.
  */
 @DisplayName("MavenResolver")
+@Execution(ExecutionMode.CONCURRENT)
 final class MavenResolverTest {
 
 	@TempDir
@@ -226,7 +229,8 @@ final class MavenResolverTest {
 		Map<String, String> empty = new HashMap<>();
 		MavenResolver.defaultChildHeap(empty);
 
-		assertThat(empty).as("default cap applied").containsEntry("MAVEN_OPTS", "-Xmx512m");
+		assertThat(empty).as("default cap applied")
+				.containsEntry("MAVEN_OPTS", "-Xms64m -Xmx512m -XX:+UseSerialGC");
 
 		Map<String, String> tuned = new HashMap<>(Map.of("MAVEN_OPTS", "-Xmx2g"));
 		MavenResolver.defaultChildHeap(tuned);
@@ -237,6 +241,21 @@ final class MavenResolverTest {
 		MavenResolver.defaultChildHeap(picked);
 
 		assertThat(picked).as("alternate tuning kept").doesNotContainKey("MAVEN_OPTS");
+	}
+
+	@Test
+	@DisplayName("evicts remembered resolutions when full")
+	void evictsMemoryWhenFull() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		for (int i = 0; i < 130; i++) {
+			Path bare = state.resolve("bare-" + i);
+			Files.createDirectories(bare);
+			assertThat(resolver.resolve(bare, false)).as("bare union stays empty").isEmpty();
+		}
+
+		assertThat(resolver.resolve(state.resolve("bare-0"), false))
+				.as("evicted project still resolves")
+				.isEmpty();
 	}
 
 	@Test

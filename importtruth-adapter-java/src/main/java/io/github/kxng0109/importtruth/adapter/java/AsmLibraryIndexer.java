@@ -51,7 +51,8 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 					continue;
 				}
 				ClassReader reader = new ClassReader(bytes, 0, bytes.length);
-				reader.accept(new TypeCollector(symbols), ClassReader.SKIP_CODE);
+				reader.accept(new TypeCollector(symbols),
+						ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
 			}
 		}
 		return symbols;
@@ -76,6 +77,12 @@ public final class AsmLibraryIndexer implements LibraryIndexer {
 				continue;
 			}
 			if (name.equals("module-info.class") || name.endsWith("/package-info.class")) {
+				continue;
+			}
+			// Skip oversized entries before allocating: declared sizes
+			// above the cap never reach the heap. Unknown sizes fall
+			// through to the parse-time gate in index().
+			if (entry.getSize() > MAX_CLASS_BYTES) {
 				continue;
 			}
 			byte[] bytes = zip.getInputStream(entry).readAllBytes();

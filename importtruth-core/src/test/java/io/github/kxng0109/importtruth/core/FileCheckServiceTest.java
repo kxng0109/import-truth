@@ -105,6 +105,55 @@ final class FileCheckServiceTest {
 	}
 
 	@Test
+	@DisplayName("rejects mid-string package matches")
+	void rejectsMidStringPackages() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/other/Partial.java",
+				"package com.other; import example.*; public class Partial { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.healthy()).as("healthy file").isTrue();
+		assertThat(result.findings()).as("partial package flagged").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("missing kind").isEqualTo(FindingKind.MISSING);
+	}
+
+	@Test
+	@DisplayName("answers JDK names with empty indexes")
+	void answersJdkWithEmptyIndexes() throws Exception {
+		JarIndexStore store = openStore(state.resolve("jdk-only"));
+		LibraryIndexer indexer = jarFile -> List.of();
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of();
+		FileCheckService check =
+				new FileCheckService(store, indexer, resolver, new JdkIndex());
+		Path clean = source("com/other/JdkOnly.java",
+				"package com.other; import java.util.List; public class JdkOnly { List<String> items; }");
+		Path missing = source("com/other/JdkMiss.java",
+				"package com.other; import java.bogus.Nope; public class JdkMiss { Nope nope; }");
+
+		assertThat(check.check(project, clean).findings()).as("JDK hit clean").isEmpty();
+		assertThat(check.check(project, missing).findings()).as("JDK miss flagged").hasSize(1);
+	}
+
+	@Test
+	@DisplayName("covers targeted JDK checks")
+	void checksTargetedJdk() throws Exception {
+		Files.write(project.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>targeted</artifactId><version>1</version><properties>"
+						+ "<maven.compiler.release>21</maven.compiler.release></properties></project>")
+						.getBytes(StandardCharsets.UTF_8));
+		FileCheckService check = service();
+		Path swing = source("com/other/Swing.java",
+				"package com.other; import javax.swing.JButton; public class Swing { JButton button; }");
+		Path miss = source("com/other/JdkMiss.java",
+				"package com.other; import java.bogus.Nope; public class JdkMiss { Nope nope; }");
+
+		assertThat(check.check(project, swing).findings()).as("javax hit clean").isEmpty();
+		assertThat(check.check(project, miss).findings()).as("targeted miss flagged").hasSize(1);
+	}
+
+	@Test
 	@DisplayName("treats unresolved own-package names as candidates")
 	void treatsOwnPackageAsCandidate() throws Exception {
 		FileCheckService check = service();

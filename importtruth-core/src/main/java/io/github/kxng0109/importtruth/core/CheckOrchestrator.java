@@ -88,7 +88,7 @@ public final class CheckOrchestrator {
 			JarIndexStore store, JdkIndex jdk, List<Path> dbs, String name, int target) {
 		try {
 			boolean jdkHit = target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name);
-			return !store.findAcross(dbs, name).isEmpty() || jdkHit;
+			return store.existsAcross(dbs, name) || jdkHit;
 		} catch (IOException failed) {
 			return false;
 		}
@@ -106,7 +106,7 @@ public final class CheckOrchestrator {
 		}
 		try {
 			for (Path db : dbs) {
-				if (!store.searchIn(db, name + ".", 1).isEmpty()) {
+				if (!store.searchPrefix(db, name + ".", 1).isEmpty()) {
 					return true;
 				}
 			}
