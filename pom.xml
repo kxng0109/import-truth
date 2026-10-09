@@ -6,7 +6,7 @@
 
   <groupId>io.github.kxng0109</groupId>
   <artifactId>importtruth</artifactId>
-  <version>0.4.0-SNAPSHOT</version>
+  <version>0.4.0</version>
   <packaging>pom</packaging>
   <name>importtruth</name>
   <description>Project-resolved API ground truth for coding agents. Java first.</description>
