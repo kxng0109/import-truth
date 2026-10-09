@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="importtruth_readme_banner.svg" alt="importtruth banner" width="680">
+</div>
+
 # importtruth
 
 Your coding agent keeps importing classes that do not exist. importtruth is
@@ -97,14 +101,14 @@ into the session. Install it and point it at the shaded JAR:
 
 ```text
 opencode plugin: opencode-plugin/importtruth.ts
-IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.3.0-SNAPSHOT.jar
+IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.4.0.jar
 ```
 
 For a small footprint, start the server with a capped heap and the
 serial collector:
 
 ```text
-java -Xms64m -Xmx256m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m -jar <path>/importtruth-cli-0.3.0-SNAPSHOT.jar
+java -Xms64m -Xmx256m -XX:+UseSerialGC -XX:MaxMetaspaceSize=192m -jar <path>/importtruth-cli-0.4.0.jar
 ```
 
 Nested Maven runs inherit a 512m cap unless MAVEN_OPTS is already set.
@@ -112,7 +116,7 @@ Nested Maven runs inherit a 512m cap unless MAVEN_OPTS is already set.
 Direct check of files (exit 1 on missing imports, silent when clean):
 
 ```text
-java -jar importtruth-cli/target/importtruth-cli-0.3.0-SNAPSHOT.jar check <project> <file>...
+java -jar importtruth-cli/target/importtruth-cli-0.4.0.jar check <project> <file>...
 ```
 
 A sample hook config lives in `.pre-commit-config.yaml`. The MCP server
