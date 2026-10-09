@@ -3,10 +3,11 @@ package io.github.kxng0109.importtruth.policy;
 import io.github.kxng0109.importtruth.model.PolicyPack;
 import io.github.kxng0109.importtruth.model.PolicyRule;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Memoizes validated policy engines per resolution. Validation walks
@@ -15,7 +16,19 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class PolicyCache {
 
-	private final Map<Key, PolicyEngine> engines = new ConcurrentHashMap<>();
+	/**
+	 * Maximum retained engines. Eldest eviction replaces the old
+	 * wholesale clear, so steady loops never hit a validation cliff.
+	 */
+	private static final int MAX_ENGINES = 128;
+
+	private final Map<Key, PolicyEngine> engines =
+			Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+				@Override
+				protected boolean removeEldestEntry(Map.Entry<Key, PolicyEngine> eldest) {
+					return size() > MAX_ENGINES;
+				}
+			});
 
 	/**
 	 * Returns the engine for these inputs, validating only on a miss.
@@ -32,9 +45,6 @@ public final class PolicyCache {
 		Objects.requireNonNull(jarIndex, "jarIndex");
 		Objects.requireNonNull(validator, "validator");
 		Key key = new Key(pack.name(), pack.rules(), jarIndex);
-		if (engines.size() >= 128) {
-			engines.clear();
-		}
 		return engines.computeIfAbsent(
 				key, missing -> new PolicyEngine(new PolicyPack(pack.name(), validator.activeRules(pack))));
 	}

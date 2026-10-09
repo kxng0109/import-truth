@@ -2,13 +2,16 @@ package io.github.kxng0109.importtruth.core;
 
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
+import io.github.kxng0109.importtruth.model.Packages;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Suggests dependency names for wanted imports: one shared resolve
@@ -74,8 +77,31 @@ public final class SuggestService {
 		}
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, resolver.resolve(projectDir, false));
 		Map<String, List<String>> answers = new LinkedHashMap<>();
+		Map<String, String> pending = new LinkedHashMap<>();
 		for (String name : names) {
-			answers.put(name, suggestionsFor(dbs, name, limit));
+			if (name == null || name.isBlank()) {
+				answers.put(name, List.of());
+				continue;
+			}
+			String plain = LookupService.plainSymbol(name);
+			if (plain.isBlank()) {
+				answers.put(name, List.of());
+				continue;
+			}
+			pending.put(name, plain);
+		}
+		// One sweep per distinct simple name: retries sharing a
+		// spelling reduce to a single index pass, ranked per input.
+		Map<String, List<String>> grouped = new LinkedHashMap<>();
+		for (Map.Entry<String, String> miss : pending.entrySet()) {
+			grouped.computeIfAbsent(Packages.simpleName(miss.getValue()), key -> new ArrayList<>())
+					.add(miss.getKey());
+		}
+		for (Map.Entry<String, List<String>> group : grouped.entrySet()) {
+			Set<String> pool = Suggestions.sweep(store, dbs, group.getKey(), 20, true);
+			for (String name : group.getValue()) {
+				answers.put(name, Suggestions.rank(pending.get(name), pool, limit));
+			}
 		}
 		return answers;
 	}

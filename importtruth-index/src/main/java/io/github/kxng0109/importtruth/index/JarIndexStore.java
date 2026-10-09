@@ -15,10 +15,13 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -32,8 +35,16 @@ public final class JarIndexStore implements AutoCloseable {
 	private final Path baseDir;
 	private final ConcurrentHashMap<String, CompletableFuture<Path>> inFlight = new ConcurrentHashMap<>();
 	private final ConcurrentHashMap<Path, ShaEntry> shas = new ConcurrentHashMap<>();
-	private final Map<Path, Connection> readers = new HashMap<>();
-	private boolean closed;
+	private final ConcurrentHashMap<Path, Connection> readers = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<Path, Object> guards = new ConcurrentHashMap<>();
+	private final Map<Path, SegmentSets> segments = new LinkedHashMap<>();
+	private volatile boolean closed;
+
+	/**
+	 * Maximum databases with cached segment sets. Content addressed
+	 * paths make sets immutable, so eldest eviction only re-reads.
+	 */
+	static final int MAX_SEGMENT_DBS = 64;
 
 	/**
 	 * Creates the store.
@@ -150,14 +161,14 @@ public final class JarIndexStore implements AutoCloseable {
 	 *
 	 * @param db index file, never null
 	 * @param fqn fully qualified name, never null
-	 * @return true when present, never null postcondition
+	 * @return true when present
 	 * @throws IOException when the index cannot be read
 	 */
 	public boolean existsIn(Path db, String fqn) throws IOException {
 		Objects.requireNonNull(db, "db");
 		Objects.requireNonNull(fqn, "fqn");
 		String sql = "SELECT 1 FROM symbols WHERE fqn = ? LIMIT 1";
-		synchronized (this) {
+		synchronized (guardFor(db)) {
 			try (PreparedStatement statement = readerFor(db).prepareStatement(sql)) {
 				statement.setString(1, fqn);
 				try (ResultSet rows = statement.executeQuery()) {
@@ -190,6 +201,70 @@ public final class JarIndexStore implements AutoCloseable {
 	}
 
 	/**
+	 * Tests whether one index might match the substring, skipping
+	 * databases whose every name segment misses it. Segment sets are
+	 * derived from content addressed index files, so a set never goes
+	 * stale: new content means a new path. Suggestion paths only;
+	 * existence verdicts never consult this set.
+	 *
+	 * @param db index file, never null
+	 * @param query substring, never null
+	 * @param insensitive true for case insensitive matching
+	 * @return false only when no segment can match, otherwise true
+	 * @throws IOException when the index cannot be read
+	 */
+	public boolean maybeMatches(Path db, String query, boolean insensitive) throws IOException {
+		Objects.requireNonNull(db, "db");
+		Objects.requireNonNull(query, "query");
+		SegmentSets sets;
+		synchronized (segments) {
+			sets = segments.get(db);
+		}
+		if (sets == null) {
+			SegmentSets loaded;
+			synchronized (guardFor(db)) {
+				loaded = loadSegments(db);
+			}
+			synchronized (segments) {
+				if (segments.size() >= MAX_SEGMENT_DBS) {
+					segments.remove(segments.keySet().iterator().next());
+				}
+				segments.put(db, loaded);
+			}
+			sets = loaded;
+		}
+		Set<String> parts = insensitive ? sets.lower() : sets.exact();
+		String needle = insensitive ? query.toLowerCase(Locale.ROOT) : query;
+		for (String part : parts) {
+			if (part.contains(needle)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private record SegmentSets(Set<String> exact, Set<String> lower) {
+	}
+
+	private SegmentSets loadSegments(Path db) throws IOException {
+		String sql = "SELECT fqn FROM symbols";
+		Set<String> exact = new HashSet<>();
+		Set<String> lower = new HashSet<>();
+		try (PreparedStatement statement = readerFor(db).prepareStatement(sql);
+				ResultSet rows = statement.executeQuery()) {
+			while (rows.next()) {
+				for (String part : rows.getString(1).split("\\.")) {
+					exact.add(part);
+					lower.add(part.toLowerCase(Locale.ROOT));
+				}
+			}
+		} catch (SQLException failure) {
+			throw new IOException("Segment read failed on " + db, failure);
+		}
+		return new SegmentSets(Set.copyOf(exact), Set.copyOf(lower));
+	}
+
+	/**
 	 * Searches names by prefix, most specific first. Without a leading
 	 * wildcard the name index can serve the range directly.
 	 *
@@ -205,13 +280,27 @@ public final class JarIndexStore implements AutoCloseable {
 		if (limit <= 0) {
 			throw new IllegalArgumentException("limit must be positive");
 		}
-		String sql = "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
-				+ " FROM symbols WHERE fqn LIKE ? ESCAPE '\\' ORDER BY LENGTH(fqn), fqn LIMIT ?";
+		// Existence probes stop at the first row: sorting only burns
+		// scans. Ordered output is kept for larger limits.
+		String sql = limit == 1
+				? "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
+						+ " FROM symbols WHERE fqn LIKE ? ESCAPE '\\' LIMIT ?"
+				: "SELECT fqn, kind, signature, parent_fqn, deprecated, deprecated_since, for_removal"
+						+ " FROM symbols WHERE fqn LIKE ? ESCAPE '\\' ORDER BY LENGTH(fqn), fqn LIMIT ?";
 		return queryList(db, sql, "Search failed on ", statement -> {
 			statement.setString(1, escapeLike(prefix) + "%");
 			statement.setInt(2, limit);
 		});
 	}
+	/**
+	 * Searches names by substring, most specific first.
+	 *
+	 * @param db index file, never null
+	 * @param query substring, never null
+	 * @param limit maximum rows, positive
+	 * @return matches ordered by name length, never null
+	 * @throws IOException when the index cannot be read
+	 */
 	public List<Symbol> searchIn(Path db, String query, int limit) throws IOException {
 		Objects.requireNonNull(db, "db");
 		Objects.requireNonNull(query, "query");
@@ -251,7 +340,7 @@ public final class JarIndexStore implements AutoCloseable {
 
 	private List<Symbol> queryList(Path db, String sql, String failurePrefix, Binder binder)
 			throws IOException {
-		synchronized (this) {
+		synchronized (guardFor(db)) {
 			try (PreparedStatement statement = readerFor(db).prepareStatement(sql)) {
 				binder.bind(statement);
 				try (ResultSet rows = statement.executeQuery()) {
@@ -261,6 +350,18 @@ public final class JarIndexStore implements AutoCloseable {
 				throw new IOException(failurePrefix + db, failure);
 			}
 		}
+	}
+
+	/**
+	 * Returns the guard for one index file. One guard per file keeps
+	 * databases independent: a slow scan on one index never blocks
+	 * reads on another. Guards live only while their database is open.
+	 *
+	 * @param db index file, never null
+	 * @return the guard, never null
+	 */
+	private Object guardFor(Path db) {
+		return guards.computeIfAbsent(db, key -> new Object());
 	}
 
 	private interface Binder {
@@ -273,7 +374,11 @@ public final class JarIndexStore implements AutoCloseable {
 	}
 
 	private void write(String sha, String artifact, List<Symbol> symbols) throws IOException {
-		String tmpBase = baseDir.resolve(sha + ".tmp").toAbsolutePath().toString();
+		// Unique tmp per writer: two processes indexing one sha must
+		// never interleave pages in a shared file. First finished
+		// publish still wins; losers delete only their own tmp.
+		String nonce = Thread.currentThread().threadId() + "." + System.nanoTime();
+		String tmpBase = baseDir.resolve(sha + ".tmp." + nonce).toAbsolutePath().toString();
 		String url = "jdbc:h2:file:" + tmpBase + ";LOCK_TIMEOUT=5000";
 		try (Connection connection = DriverManager.getConnection(url)) {
 			try (Statement schema = connection.createStatement()) {
@@ -313,7 +418,7 @@ public final class JarIndexStore implements AutoCloseable {
 		} catch (SQLException failure) {
 			throw new IOException("Index write failed for " + sha, failure);
 		}
-		Path tmpFile = baseDir.resolve(sha + ".tmp.mv.db");
+		Path tmpFile = baseDir.resolve(sha + ".tmp." + nonce + ".mv.db");
 		publishTmp(tmpFile, dbFile(sha));
 	}
 
@@ -345,7 +450,8 @@ public final class JarIndexStore implements AutoCloseable {
 
 	/**
 	 * Returns the shared read connection for one index file,
-	 * opening it on first use. Callers synchronize on the store.
+	 * opening it on first use. Callers hold that file's guard, so one
+	 * connection never serves two threads at once.
 	 */
 	private Connection readerFor(Path db) throws SQLException {
 		if (closed) {
@@ -354,24 +460,33 @@ public final class JarIndexStore implements AutoCloseable {
 		Connection reader = readers.get(db);
 		if (reader == null) {
 			reader = connectRead(db);
-			readers.put(db, reader);
+			Connection raced = readers.putIfAbsent(db, reader);
+			if (raced != null) {
+				reader.close();
+				reader = raced;
+			}
 		}
 		return reader;
 	}
 
 	/**
 	 * Closes every shared read connection and releases the index files.
+	 * New queries fail fast once closing starts; in flight queries on
+	 * one file drain before that file closes.
 	 *
 	 * @throws SQLException when a connection cannot close
 	 */
 	@Override
 	public void close() throws SQLException {
-		synchronized (this) {
-			closed = true;
-			for (Connection reader : readers.values()) {
-				reader.close();
+		closed = true;
+		for (Path db : List.copyOf(readers.keySet())) {
+			synchronized (guardFor(db)) {
+				Connection reader = readers.remove(db);
+				guards.remove(db);
+				if (reader != null) {
+					reader.close();
+				}
 			}
-			readers.clear();
 		}
 	}
 

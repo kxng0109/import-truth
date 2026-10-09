@@ -144,7 +144,8 @@ final class LookupSearchTest {
 		LookupService lookup = new LookupService(store, indexer, resolver, new JdkIndex());
 
 		List<String> wanted = new ArrayList<>(
-				List.of("com.example.Widget", "org.example.Widget", "org.example.Nope", " ", "java.util.ArrayList"));
+				List.of("com.example.Widget", "org.example.Widget", "org.example.Nope", " ", "java.util.ArrayList",
+						"<T>"));
 		wanted.add(null);
 		Map<String, LookupResult> answers = lookup.lookupBatch(project, wanted);
 
@@ -155,11 +156,36 @@ final class LookupSearchTest {
 				.contains("com.example.Widget");
 		assertThat(answers.get("org.example.Nope").found()).as("unknown miss").isFalse();
 		assertThat(answers.get(" ").found()).as("blank miss").isFalse();
+		assertThat(answers.get("<T>").found()).as("bare type variable miss").isFalse();
 		assertThat(answers.get(null).found()).as("null miss").isFalse();
 		assertThat(answers.get("java.util.ArrayList").fromJdk()).as("JDK flagged").isTrue();
 		assertThat(lookup.lookup(project, "com.example.Widget"))
 				.as("batch matches single")
 				.isEqualTo(answers.get("com.example.Widget"));
+		assertThat(lookup.lookup(project, "org.example.Widget"))
+				.as("batch miss matches single miss")
+				.isEqualTo(answers.get("org.example.Widget"));
+	}
+
+	@Test
+	@DisplayName("covers targeted JDK paths in batches")
+	void batchesTargetedJdk() throws Exception {
+		Services services = services();
+		Files.write(project.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>targeted</artifactId><version>1</version><properties>"
+						+ "<maven.compiler.release>21</maven.compiler.release></properties></project>")
+						.getBytes(StandardCharsets.UTF_8));
+
+		Map<String, LookupResult> answers = services.lookup().lookupBatch(project,
+				List.of("java.util.ArrayList", "org.example.Widget"));
+
+		assertThat(answers.get("java.util.ArrayList").fromJdk()).as("targeted JDK hit").isTrue();
+		assertThat(answers.get("org.example.Widget").suggestions()).as("targeted miss suggests")
+				.contains("com.example.Widget");
+		assertThat(services.lookup().lookup(project, "java.util.ArrayList").fromJdk())
+				.as("single targeted hit")
+				.isTrue();
 	}
 
 	@Test

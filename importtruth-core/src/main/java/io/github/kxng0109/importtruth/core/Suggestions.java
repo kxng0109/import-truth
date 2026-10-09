@@ -36,26 +36,8 @@ public final class Suggestions {
 	 */
 	public static List<String> collect(
 			JarIndexStore store, List<Path> dbs, String want, int collected, int limit) throws IOException {
-		Objects.requireNonNull(store, "store");
-		Objects.requireNonNull(dbs, "dbs");
-		Objects.requireNonNull(want, "want");
-		if (collected <= 0 || limit <= 0) {
-			throw new IllegalArgumentException("collected and limit must be positive");
-		}
-		String simple = Packages.simpleName(want);
-		Set<String> names = new LinkedHashSet<>();
-		for (Path db : dbs) {
-			for (Symbol match : store.searchIn(db, simple, collected)) {
-				names.add(match.fqn());
-				if (names.size() >= collected) {
-					break;
-				}
-			}
-			if (names.size() >= collected) {
-				break;
-			}
-		}
-		return rank(want, names, limit);
+		validate(store, dbs, want, collected, limit);
+		return rank(want, sweep(store, dbs, Packages.simpleName(want), collected, false), limit);
 	}
 
 	/**
@@ -72,16 +54,42 @@ public final class Suggestions {
 	 */
 	public static List<String> collectInsensitive(
 			JarIndexStore store, List<Path> dbs, String want, int collected, int limit) throws IOException {
+		validate(store, dbs, want, collected, limit);
+		return rank(want, sweep(store, dbs, Packages.simpleName(want), collected, true), limit);
+	}
+
+	/**
+	 * Sweeps indexes once for one simple name, gathering candidate
+	 * names without ranking. Shared by batches whose misses reduce
+	 * to the same simple name. Databases whose every name segment
+	 * misses the simple name are skipped without a scan.
+	 *
+	 * @param store index store, never null
+	 * @param dbs index files, never null
+	 * @param simple simple name to find, never null
+	 * @param collected maximum candidates gathered, positive
+	 * @param insensitive true for case insensitive matching
+	 * @return candidate names in index order, never null
+	 * @throws IOException when index reads fail
+	 */
+	public static Set<String> sweep(
+			JarIndexStore store, List<Path> dbs, String simple, int collected, boolean insensitive)
+			throws IOException {
 		Objects.requireNonNull(store, "store");
 		Objects.requireNonNull(dbs, "dbs");
-		Objects.requireNonNull(want, "want");
-		if (collected <= 0 || limit <= 0) {
-			throw new IllegalArgumentException("collected and limit must be positive");
+		Objects.requireNonNull(simple, "simple");
+		if (collected <= 0) {
+			throw new IllegalArgumentException("collected must be positive");
 		}
-		String simple = Packages.simpleName(want);
 		Set<String> names = new LinkedHashSet<>();
 		for (Path db : dbs) {
-			for (Symbol match : store.searchInInsensitive(db, simple, collected)) {
+			if (!store.maybeMatches(db, simple, insensitive)) {
+				continue;
+			}
+			List<Symbol> matches = insensitive
+					? store.searchInInsensitive(db, simple, collected)
+					: store.searchIn(db, simple, collected);
+			for (Symbol match : matches) {
 				names.add(match.fqn());
 				if (names.size() >= collected) {
 					break;
@@ -91,7 +99,17 @@ public final class Suggestions {
 				break;
 			}
 		}
-		return rank(want, names, limit);
+		return names;
+	}
+
+	private static void validate(
+			JarIndexStore store, List<Path> dbs, String want, int collected, int limit) {
+		Objects.requireNonNull(store, "store");
+		Objects.requireNonNull(dbs, "dbs");
+		Objects.requireNonNull(want, "want");
+		if (collected <= 0 || limit <= 0) {
+			throw new IllegalArgumentException("collected and limit must be positive");
+		}
 	}
 
 	/**

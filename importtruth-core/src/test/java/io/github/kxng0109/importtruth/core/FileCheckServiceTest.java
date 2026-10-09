@@ -136,6 +136,24 @@ final class FileCheckServiceTest {
 	}
 
 	@Test
+	@DisplayName("covers targeted JDK checks")
+	void checksTargetedJdk() throws Exception {
+		Files.write(project.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>targeted</artifactId><version>1</version><properties>"
+						+ "<maven.compiler.release>21</maven.compiler.release></properties></project>")
+						.getBytes(StandardCharsets.UTF_8));
+		FileCheckService check = service();
+		Path swing = source("com/other/Swing.java",
+				"package com.other; import javax.swing.JButton; public class Swing { JButton button; }");
+		Path miss = source("com/other/JdkMiss.java",
+				"package com.other; import java.bogus.Nope; public class JdkMiss { Nope nope; }");
+
+		assertThat(check.check(project, swing).findings()).as("javax hit clean").isEmpty();
+		assertThat(check.check(project, miss).findings()).as("targeted miss flagged").hasSize(1);
+	}
+
+	@Test
 	@DisplayName("treats unresolved own-package names as candidates")
 	void treatsOwnPackageAsCandidate() throws Exception {
 		FileCheckService check = service();

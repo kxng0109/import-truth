@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -142,9 +143,42 @@ final class JarIndexStoreTest {
 		assertThat(store.searchPrefix(db, "example.", 5))
 				.as("mid-string prefix misses")
 				.isEmpty();
+		assertThat(store.searchPrefix(db, "com.example.", 1))
+				.as("limit one probe stops fast")
+				.hasSize(1);
 		assertThat(store.searchPrefix(db, "com.example_Widget", 5))
 				.as("underscore escaped literally")
 				.isEmpty();
+	}
+
+	@Test
+	@DisplayName("prefilters databases by name segments")
+	void prefiltersBySegments() throws Exception {
+		JarIndexStore store = openStore("segments");
+		Path db = store.ensureIndexed(fakeJar("s.jar"), new FakeIndexer());
+
+		assertThat(store.maybeMatches(db, "Widget", false)).as("simple present").isTrue();
+		assertThat(store.maybeMatches(db, "example", false)).as("package part present").isTrue();
+		assertThat(store.maybeMatches(db, "Nope", false)).as("absent simple").isFalse();
+		assertThat(store.maybeMatches(db, "widget", false)).as("case sensitive miss").isFalse();
+		assertThat(store.maybeMatches(db, "widget", true)).as("case insensitive hit").isTrue();
+		assertThat(store.maybeMatches(db, "WIDGET", true)).as("uppercase hit").isTrue();
+		assertThat(store.maybeMatches(db, "xyz", true)).as("absent insensitive").isFalse();
+	}
+
+	@Test
+	@DisplayName("rejects null prefilter queries")
+	@SuppressWarnings("DataFlowIssue")
+	void rejectsNullPrefilter() throws Exception {
+		JarIndexStore store = openStore("segments-null");
+		Path db = store.ensureIndexed(fakeJar("sn.jar"), new FakeIndexer());
+
+		assertThatThrownBy(() -> store.maybeMatches(null, "x", false))
+				.as("null db rejection")
+				.isInstanceOf(NullPointerException.class);
+		assertThatThrownBy(() -> store.maybeMatches(db, null, false))
+				.as("null query rejection")
+				.isInstanceOf(NullPointerException.class);
 	}
 
 	@Test
@@ -172,6 +206,23 @@ final class JarIndexStoreTest {
 		assertThatThrownBy(() -> store.searchPrefix(db, null, 5))
 				.as("null prefix rejection")
 				.isInstanceOf(NullPointerException.class);
+	}
+
+	@Test
+	@DisplayName("evicts eldest segment sets when full")
+	void evictsEldestSegments() throws Exception {
+		JarIndexStore store = openStore("segments-full");
+		FakeIndexer indexer = new FakeIndexer();
+		Path first = null;
+		for (int i = 0; i < 65; i++) {
+			Path db = store.ensureIndexed(fakeJar("seg-" + i + ".jar"), indexer);
+			if (i == 0) {
+				first = db;
+			}
+			assertThat(store.maybeMatches(db, "Widget", false)).as("segments load").isTrue();
+		}
+
+		assertThat(store.maybeMatches(first, "Widget", false)).as("evicted set reloads").isTrue();
 	}
 
 	@Test
@@ -330,6 +381,68 @@ final class JarIndexStoreTest {
 			assertThatThrownBy(() -> leader.get(10, TimeUnit.SECONDS))
 					.as("leader fails too")
 					.isInstanceOf(ExecutionException.class);
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("answers identically under concurrent load")
+	@Timeout(value = 30, unit = TimeUnit.SECONDS)
+	void answersConcurrently() throws Exception {
+		JarIndexStore store = openStore("concurrent");
+		Path first = fakeJar("cone.jar");
+		Path second = fakeJar("ctwo.jar");
+		LibraryIndexer indexer = jarFile -> jarFile.getFileName().toString().equals("cone.jar")
+				? List.of(new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false))
+				: List.of(new Symbol("com.example.Gadget", SymbolKind.CLASS, null, null, false, "", false));
+		Path dbOne = store.ensureIndexed(first, indexer);
+		Path dbTwo = store.ensureIndexed(second, indexer);
+		List<Path> dbs = List.of(dbOne, dbTwo);
+
+		assertThat(store.findAcross(dbs, "com.example.Widget")).as("serial baseline").hasSize(1);
+		assertThat(store.existsAcross(dbs, "com.example.Gadget")).as("serial exists").isTrue();
+
+		int threads = 8;
+		CountDownLatch gate = new CountDownLatch(1);
+		List<Throwable> failures = Collections.synchronizedList(new ArrayList<>());
+		ExecutorService pool = Executors.newFixedThreadPool(threads);
+		try {
+			List<Future<?>> runs = new ArrayList<>();
+			for (int i = 0; i < threads; i++) {
+				runs.add(pool.submit(() -> {
+					try {
+						if (!gate.await(10, TimeUnit.SECONDS)) {
+							throw new IOException("test gate timed out");
+						}
+						for (int round = 0; round < 25; round++) {
+							if (store.findAcross(dbs, "com.example.Widget").size() != 1) {
+								throw new AssertionError("find drifted");
+							}
+							if (!store.existsAcross(dbs, "com.example.Gadget")) {
+								throw new AssertionError("exists drifted");
+							}
+							if (store.searchPrefix(dbOne, "com.example.", 5).size() != 1) {
+								throw new AssertionError("prefix drifted");
+							}
+							if (!store.maybeMatches(dbTwo, "Gadget", false)) {
+								throw new AssertionError("prefilter drifted");
+							}
+							if (store.searchIn(dbTwo, "Gadget", 5).size() != 1) {
+								throw new AssertionError("search drifted");
+							}
+						}
+					} catch (Throwable failure) {
+						failures.add(failure);
+					}
+					return null;
+				}));
+			}
+			gate.countDown();
+			for (Future<?> run : runs) {
+				run.get(20, TimeUnit.SECONDS);
+			}
+			assertThat(failures).as("zero concurrent failures").isEmpty();
 		} finally {
 			pool.shutdownNow();
 		}

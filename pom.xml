@@ -103,6 +103,8 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
           <excludedGroups>slow</excludedGroups>
+          <forkCount>2</forkCount>
+          <reuseForks>true</reuseForks>
         </configuration>
       </plugin>
       <plugin>
