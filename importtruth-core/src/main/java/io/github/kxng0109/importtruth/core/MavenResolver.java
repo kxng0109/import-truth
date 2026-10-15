@@ -17,6 +17,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -98,6 +99,7 @@ public final class MavenResolver implements DependencyResolver {
 		}
 		Set<Path> union = new LinkedHashSet<>();
 		List<String> failures = new ArrayList<>();
+		boolean tooling = false;
 		for (Path module : modulesOf(projectDir)) {
 			// Maven resolves the output property against the module
 			// directory, so the scratch file is a bare filename there:
@@ -109,12 +111,14 @@ public final class MavenResolver implements DependencyResolver {
 			Path out = module.resolve(scratch);
 			Files.deleteIfExists(out);
 			ResolveOutcome outcome = runBuildClasspath(projectDir, module, out, true);
-			if (!outcome.ok() && allowNetwork) {
+			boolean missingTooling = !outcome.ok() && isToolingFailure(outcome.tail());
+			if (!outcome.ok() && retryOnline(allowNetwork, outcome.tail())) {
 				Files.deleteIfExists(out);
 				outcome = runBuildClasspath(projectDir, module, out, false);
 			}
 			if (!outcome.ok()) {
 				failures.add(module.getFileName() + ": " + outcome.tail());
+				tooling |= missingTooling;
 				Files.deleteIfExists(out);
 				continue;
 			}
@@ -124,8 +128,7 @@ public final class MavenResolver implements DependencyResolver {
 		List<Path> jars = List.copyOf(union);
 		if (!failures.isEmpty()) {
 			throw new IOException("No dependencies resolved for " + projectDir + ": "
-					+ String.join(" | ", failures)
-					+ " (hint: sibling snapshot modules may need 'mvn install' first)");
+					+ String.join(" | ", failures) + failureHint(tooling));
 		}
 		Path staged = stateDir.resolve("resolve").resolve(hash + "." + Thread.currentThread().threadId()
 				+ "." + System.nanoTime() + ".tmp");
@@ -283,6 +286,55 @@ public final class MavenResolver implements DependencyResolver {
 				&& !environment.containsKey("JDK_JAVA_OPTIONS")) {
 			environment.put("MAVEN_OPTS", "-Xms64m -Xmx512m -XX:+UseSerialGC");
 		}
+	}
+
+	/**
+	 * Tests whether a failed child tail means our own pinned tooling is
+	 * missing from the local repository rather than a project problem.
+	 * Only this shape earns an online retry: project dependency failures
+	 * stay offline and loud.
+	 *
+	 * @param tail child output tail, possibly null
+	 * @return true when the tail names the missing dependency plugin
+	 */
+	static boolean isToolingFailure(String tail) {
+		if (tail == null || tail.isBlank()) {
+			return false;
+		}
+		String compact = tail.toLowerCase(Locale.ROOT);
+		return compact.contains("maven-dependency-plugin")
+				&& (compact.contains("has not been downloaded") || compact.contains("in offline mode"));
+	}
+
+	/**
+	 * Decides whether a failed offline attempt earns one online retry.
+	 * Callers opting into network always retry; otherwise only a
+	 * missing tooling signature retries, so project resolution stays
+	 * hermetic. Extracted so the policy is unit testable without
+	 * spawning Maven.
+	 *
+	 * @param allowNetwork caller opt-in to network use
+	 * @param offlineTail failed offline child tail, possibly null
+	 * @return true when the online retry should run
+	 */
+	static boolean retryOnline(boolean allowNetwork, String offlineTail) {
+		return allowNetwork || isToolingFailure(offlineTail);
+	}
+
+	/**
+	 * Picks the failure hint for an unresolvable project. A cold
+	 * tooling cache names the warmup command; anything else keeps the
+	 * sibling snapshot hint.
+	 *
+	 * @param toolingMissing true when a module failed on missing tooling
+	 * @return hint suffix starting with a space, never null
+	 */
+	static String failureHint(boolean toolingMissing) {
+		if (toolingMissing) {
+			return " (hint: the Maven plugin cache looks cold; run one online build"
+					+ " such as 'mvn -B -ntp compile' in the project, then retry)";
+		}
+		return " (hint: sibling snapshot modules may need 'mvn install' first)";
 	}
 
 	private record ResolveOutcome(boolean ok, String tail) {
