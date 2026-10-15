@@ -82,6 +82,9 @@ including coverage gates.
 A project with several modules needs its sibling snapshots
 installed (`mvn install` once). Otherwise resolution fails loudly
 rather than guessing. CI runs `install` for exactly this reason.
+On a fresh machine the first lookup downloads our pinned Maven
+plugin once, then stays offline; project dependencies are never
+fetched on your behalf.
 
 Every module enforces coverage gates on `verify`: 95% line, 90% branch
 (the `Main` wiring class is excluded. Everything else is tested). The

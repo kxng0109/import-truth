@@ -14,6 +14,7 @@ import java.nio.file.Paths;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CancellationException;
@@ -241,6 +242,56 @@ final class MavenResolverTest {
 		MavenResolver.defaultChildHeap(picked);
 
 		assertThat(picked).as("alternate tuning kept").doesNotContainKey("MAVEN_OPTS");
+	}
+
+	@Test
+	@DisplayName("classifies missing tooling tails for online retry")
+	@SuppressWarnings("DataFlowIssue")
+	void classifiesToolingFailures() {
+		String downloaded = "exit=1 [ERROR] Failed to execute goal"
+				+ " org.apache.maven.plugins:maven-dependency-plugin:3.11.0:build-classpath:"
+				+ " Cannot access central (https://repo.maven.apache.org/maven2) in offline mode"
+				+ " and the artifact has not been downloaded from it before.";
+
+		assertThat(MavenResolver.isToolingFailure(downloaded)).as("missing plugin").isTrue();
+		assertThat(MavenResolver.isToolingFailure(downloaded.toUpperCase(Locale.ROOT)))
+				.as("case insensitive")
+				.isTrue();
+		assertThat(MavenResolver.isToolingFailure(
+				"exit=1 [ERROR] maven-dependency-plugin:3.11.0 could not be resolved in offline mode"))
+				.as("offline mode wording")
+				.isTrue();
+		assertThat(MavenResolver.isToolingFailure(
+				"exit=1 [ERROR] Failed to resolve org.example:missing:jar:1"))
+				.as("project dependency")
+				.isFalse();
+		assertThat(MavenResolver.isToolingFailure(
+				"exit=1 [ERROR] Non-resolvable parent POM for t:root:1"))
+				.as("unrelated failure")
+				.isFalse();
+		assertThat(MavenResolver.isToolingFailure("")).as("blank tail").isFalse();
+		assertThat(MavenResolver.isToolingFailure(null)).as("null tail").isFalse();
+	}
+
+	@Test
+	@DisplayName("retries online for opt-in callers or missing tooling")
+	@SuppressWarnings("DataFlowIssue")
+	void decidesOnlineRetry() {
+		String tooling = "exit=1 maven-dependency-plugin:3.11.0 has not been downloaded";
+		String project = "exit=1 Failed to resolve org.example:missing:jar:1";
+
+		assertThat(MavenResolver.retryOnline(true, project)).as("opt-in retries").isTrue();
+		assertThat(MavenResolver.retryOnline(false, tooling)).as("tooling self heals").isTrue();
+		assertThat(MavenResolver.retryOnline(false, project)).as("project stays offline").isFalse();
+		assertThat(MavenResolver.retryOnline(false, null)).as("null stays offline").isFalse();
+	}
+
+	@Test
+	@DisplayName("names the warmup when the tooling cache is cold")
+	void namesWarmupHint() {
+		assertThat(MavenResolver.failureHint(true)).as("tooling hint")
+				.contains("mvn -B -ntp compile");
+		assertThat(MavenResolver.failureHint(false)).as("sibling hint").contains("install");
 	}
 
 	@Test
