@@ -135,6 +135,11 @@ final class FullServerE2ETest {
 					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
 					+ "\",\"filePaths\":[\"" + escape(file.toString()) + "\"]}}}");
 			assertThat(awaitLine(lines, "\"id\":7")).as("batch check answer").contains("clean");
+			streams.write("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"analyze_dependencies\","
+					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString()) + "\"}}}");
+			String analysis = awaitLine(lines, "\"id\":9");
+			assertThat(analysis).as("analysis answer").contains("UNVERIFIED dep.jar");
+			assertThat(analysis).as("no candidate without the compiled classes").doesNotContain("UNREFERENCED");
 		}
 		assertThat(errors).as("reader thread errors").isEmpty();
 	}

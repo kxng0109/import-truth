@@ -30,9 +30,11 @@ public final class Main {
 	}
 
 	/**
-	 * Starts the MCP server on standard input and output, or checks files.
+	 * Starts the MCP server on standard input and output, or checks files,
+	 * or reports the dependency usage of a project.
 	 *
-	 * @param args empty to serve, or {@code check <projectDir> <file>...}
+	 * @param args empty to serve, {@code check <projectDir> <file>...}, or
+	 *             {@code deps <projectDir> [classesPath]}
 	 * @throws Exception when the server thread is interrupted
 	 */
 	public static void main(String[] args) throws Exception {
@@ -50,6 +52,18 @@ public final class Main {
 				files.add(Paths.get(args[i]));
 			}
 			System.exit(command.runAll(System.out, System.err, project, files));
+			return;
+		}
+		if (args.length >= 1 && "deps".equals(args[0])) {
+			if (args.length < 2 || args.length > 3) {
+				System.err.println("usage: deps <projectDir> [classesPath]");
+				System.exit(1);
+				return;
+			}
+			DepsCommand command = new DepsCommand(resolver);
+			Path project = Paths.get(args[1]);
+			Path classes = args.length > 2 ? Paths.get(args[2]) : null;
+			System.exit(command.run(System.out, System.err, project, classes));
 			return;
 		}
 		// Standard output is the protocol channel: keep it, then point all

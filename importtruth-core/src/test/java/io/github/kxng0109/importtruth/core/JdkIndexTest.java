@@ -94,7 +94,7 @@ final class JdkIndexTest {
 	@DisplayName("answers when the JDK has no readable ct.sym")
 	void answersWithoutCtSym() {
 		Path archive = state.resolve("absent").resolve("ct.sym");
-		JdkIndex index = new JdkIndex(archive, state);
+		JdkIndex index = archiveOnly(archive, state);
 
 		assertThat(index.existsIn("java.util.List", 17)).as("falls back to the running image").isTrue();
 		assertThat(index.existsIn("com.example.Nope", 17)).as("absent everywhere").isFalse();
@@ -105,7 +105,7 @@ final class JdkIndexTest {
 	@DisplayName("caches the missing archive instead of parsing it again")
 	void cachesMissingArchive() throws Exception {
 		Path archive = state.resolve("ct.sym");
-		JdkIndex index = new JdkIndex(archive, state);
+		JdkIndex index = archiveOnly(archive, state);
 
 		assertThat(index.existsIn("com.example.Synthetic", 17)).as("nothing known yet").isFalse();
 
@@ -121,12 +121,12 @@ final class JdkIndexTest {
 	void servesReleaseIndexFromDisk() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		JdkIndex first = new JdkIndex(archive, state);
+		JdkIndex first = archiveOnly(archive, state);
 
 		assertThat(first.existsIn("com.example.Synthetic", 17)).as("read from the archive").isTrue();
 
 		Files.delete(archive);
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("read from the cache").isTrue();
 	}
@@ -136,10 +136,10 @@ final class JdkIndexTest {
 	void ignoresCorruptCache() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		Files.writeString(onlyCacheFile(), "not a cache file at all");
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the archive was parsed again").isTrue();
 	}
@@ -149,10 +149,10 @@ final class JdkIndexTest {
 	void reparsesChangedArchive() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		writeArchive(archive, "H/java.base/com/example/Other.sig", "H/java.base/com/example/Third.sig");
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the stale cache is not used").isFalse();
 		assertThat(second.existsIn("com.example.Other", 17)).as("the new archive is read").isTrue();
@@ -163,10 +163,10 @@ final class JdkIndexTest {
 	void reparsesTouchedArchive() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		Files.setLastModifiedTime(archive, FileTime.fromMillis(1_000_000L));
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the stale cache is not used").isTrue();
 	}
@@ -174,7 +174,7 @@ final class JdkIndexTest {
 	@Test
 	@DisplayName("caches the release index under the state directory")
 	void cachesUnderTheStateDirectory() throws Exception {
-		JdkIndex index = new JdkIndex(state);
+		JdkIndex index = archiveOnly(defaultArchive(), state);
 
 		assertThat(index.existsIn("java.util.List", 17)).as("documented type").isTrue();
 		assertThat(state.resolve("jdk")).as("the cache directory").isDirectory();
@@ -184,11 +184,119 @@ final class JdkIndexTest {
 	}
 
 	@Test
+	@DisplayName("answers a covered release from the bundled table")
+	void answersCoveredReleaseFromTable() {
+		JdkIndex index = new JdkIndex(null, null, List.of());
+		int release = newestCoveredRelease();
+
+		assertThat(index.existsIn("java.util.List", release)).as("documented in the table").isTrue();
+		assertThat(index.existsIn("com.example.Nope", release)).as("absent from the table").isFalse();
+		assertThat(index.packageExistsIn("java.util", release)).as("package in the table").isTrue();
+	}
+
+	@Test
+	@DisplayName("keeps the JDK surface unconsulted for a release nothing covers")
+	void keepsUncoveredReleaseUnconsulted() {
+		JdkIndex index = new JdkIndex(null, null, List.of());
+		int uncovered = newestCoveredRelease() + 5;
+
+		assertThat(index.existsIn("java.util.List", uncovered)).as("nothing to consult").isFalse();
+		assertThat(index.available()).as("the JDK surface could not be consulted").isFalse();
+	}
+
+	@Test
+	@DisplayName("falls back to the archive for a release the table does not cover")
+	void fallsBackToTheArchive() throws Exception {
+		Path archive = state.resolve("ct.sym");
+		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
+		JdkIndex index = new JdkIndex(archive, state, partialTable());
+
+		assertThat(index.existsIn("com.example.Synthetic", 17)).as("read from the archive").isTrue();
+		assertThat(index.existsIn("java.util.List", 8)).as("read from the table").isTrue();
+		assertThat(index.existsIn("java.util.List", 17)).as("the table does not cover it").isFalse();
+	}
+
+	@Test
+	@DisplayName("answers the archive when the table covers nothing")
+	void answersFromTheArchiveWhenTheTableIsEmpty() throws Exception {
+		Path archive = state.resolve("ct.sym");
+		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
+		JdkIndex index = archiveOnly(archive, state);
+
+		assertThat(index.existsIn("com.example.Synthetic", 17)).as("read from the archive").isTrue();
+		assertThat(index.existsIn("com.example.Other", 17)).as("absent from the archive").isFalse();
+	}
+
+	@Test
+	@DisplayName("reports the JDK surface as consulted only for a covered release")
+	void reportsAvailability() {
+		JdkIndex index = new JdkIndex(null, null, List.of());
+		int covered = newestCoveredRelease();
+
+		assertThat(index.available()).as("nothing was consulted yet").isFalse();
+		assertThat(index.existsIn("java.util.List", covered)).as("the table answers").isTrue();
+		assertThat(index.available()).as("the table can be consulted").isTrue();
+		assertThat(index.existsIn("java.util.List", covered + 5)).as("nothing answers").isFalse();
+		assertThat(index.available()).as("nothing can be consulted").isFalse();
+	}
+
+	@Test
+	@DisplayName("forgets the release when the question names none")
+	void forgetsTheRelease() {
+		JdkIndex index = new JdkIndex(null, null, List.of());
+
+		assertThat(index.existsIn("java.util.List", newestCoveredRelease())).as("the table answers").isTrue();
+		assertThat(index.available()).as("the table can be consulted").isTrue();
+		index.exists("java.util.List");
+		assertThat(index.available()).as("the question named no release").isFalse();
+	}
+
+	@Test
+	@DisplayName("forgets the release when a package question names none")
+	void forgetsTheReleaseForPackages() {
+		JdkIndex index = new JdkIndex(null, null, List.of());
+
+		assertThat(index.existsIn("java.util.List", newestCoveredRelease())).as("the table answers").isTrue();
+		assertThat(index.available()).as("the table can be consulted").isTrue();
+		index.packageExists("java.util");
+		assertThat(index.available()).as("the question named no release").isFalse();
+	}
+
+	@Test
+	@DisplayName("answers with an empty table when there is none")
+	void answersWithNoTable() {
+		JdkIndex index = new JdkIndex(null, null, List.of(), null);
+
+		assertThat(index.existsIn("java.util.List", 17)).as("nothing to consult").isFalse();
+		assertThat(index.available()).as("nothing can be consulted").isFalse();
+	}
+
+	@Test
+	@DisplayName("answers a package from the archive")
+	void answersPackageFromTheArchive() throws Exception {
+		Path archive = state.resolve("ct.sym");
+		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
+		JdkIndex index = archiveOnly(archive, state);
+
+		assertThat(index.packageExistsIn("com.example", 17)).as("read from the archive").isTrue();
+		assertThat(index.packageExistsIn("com.other", 17)).as("absent from the archive").isFalse();
+	}
+
+	@Test
+	@DisplayName("answers a package from the running image for an uncovered release")
+	void answersPackageFromTheRunningImage() {
+		JdkIndex index = new JdkIndex(null, null);
+
+		assertThat(index.packageExistsIn("java.util", newestCoveredRelease() + 5)).as("the running image")
+				.isTrue();
+	}
+
+	@Test
 	@DisplayName("has no documented API in an archive without that release")
 	void emptyArchiveHasNoDocumentedApi() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "A/java.base/com/example/Other.sig");
-		JdkIndex index = new JdkIndex(archive, state);
+		JdkIndex index = archiveOnly(archive, state);
 
 		assertThat(index.existsIn("com.example.Other", 17)).as("no documented API").isFalse();
 	}
@@ -198,10 +306,10 @@ final class JdkIndexTest {
 	void ignoresUnreadableCache() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		Files.write(onlyCacheFile(), new byte[] { (byte) 0xff, (byte) 0xfe, (byte) 0xfd });
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the archive was parsed again").isTrue();
 	}
@@ -211,7 +319,7 @@ final class JdkIndexTest {
 	void ignoresCacheForAnotherArchive() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		Files.writeString(onlyCacheFile(), String.join("\n", List.of(
 				"importtruth-jdk-index 1",
@@ -223,7 +331,7 @@ final class JdkIndexTest {
 				"com/example/Fake.class",
 				"packages 1",
 				"com/example")) + "\n");
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Fake", 17)).as("the foreign cache is not used").isFalse();
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the archive was parsed again").isTrue();
@@ -234,11 +342,11 @@ final class JdkIndexTest {
 	void ignoresTruncatedCache() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		Files.writeString(onlyCacheFile(), String.join("\n", cacheHeader(archive, 17))
 				+ "\nclasses 3\nonly/one.class\n");
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the archive was parsed again").isTrue();
 	}
@@ -248,7 +356,7 @@ final class JdkIndexTest {
 	void ignoresCacheWithBrokenCount() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		Files.writeString(onlyCacheFile(), String.join("\n", List.of(
 				"importtruth-jdk-index 1",
@@ -256,7 +364,7 @@ final class JdkIndexTest {
 				"size not-a-number",
 				"modified 1",
 				"release 17")) + "\n");
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the archive was parsed again").isTrue();
 	}
@@ -266,10 +374,10 @@ final class JdkIndexTest {
 	void ignoresCacheWithoutHeader() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 
 		Files.writeString(onlyCacheFile(), "importtruth-jdk-index 1\n");
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the archive was parsed again").isTrue();
 	}
@@ -280,7 +388,7 @@ final class JdkIndexTest {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
 		Files.writeString(state.resolve("jdk"), "not a directory");
-		JdkIndex index = new JdkIndex(archive, state);
+		JdkIndex index = archiveOnly(archive, state);
 
 		assertThat(index.existsIn("com.example.Synthetic", 17)).as("the archive was parsed").isTrue();
 	}
@@ -290,7 +398,7 @@ final class JdkIndexTest {
 	void ignoresEveryMalformedCache() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 		Path cache = onlyCacheFile();
 		List<String> header = cacheHeader(archive, 17);
 		List<List<String>> broken = List.of(
@@ -305,7 +413,7 @@ final class JdkIndexTest {
 				List.of("importtruth-jdk-index 1", "sizex 1", "modified 1", "release 17"));
 		for (List<String> content : broken) {
 			Files.writeString(cache, String.join("\n", content) + "\n");
-			JdkIndex second = new JdkIndex(archive, state);
+			JdkIndex second = archiveOnly(archive, state);
 
 			assertThat(second.existsIn("com.example.Synthetic", 17))
 					.as("the archive was parsed again for " + content)
@@ -318,12 +426,12 @@ final class JdkIndexTest {
 	void ignoresOversizedCache() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H/java.base/com/example/Synthetic.sig");
-		new JdkIndex(archive, state).existsIn("com.example.Synthetic", 17);
+		archiveOnly(archive, state).existsIn("com.example.Synthetic", 17);
 		Path cache = onlyCacheFile();
 		try (RandomAccessFile oversized = new RandomAccessFile(cache.toFile(), "rw")) {
 			oversized.setLength(33L * 1024 * 1024);
 		}
-		JdkIndex second = new JdkIndex(archive, state);
+		JdkIndex second = archiveOnly(archive, state);
 
 		assertThat(second.existsIn("com.example.Synthetic", 17)).as("the archive was parsed again").isTrue();
 	}
@@ -333,9 +441,56 @@ final class JdkIndexTest {
 	void readsEntryWithoutPath() throws Exception {
 		Path archive = state.resolve("ct.sym");
 		writeArchive(archive, "H", "H/java.base/com/example/Synthetic.sig");
-		JdkIndex index = new JdkIndex(archive, state);
+		JdkIndex index = archiveOnly(archive, state);
 
 		assertThat(index.existsIn("com.example.Synthetic", 17)).as("documented type").isTrue();
+	}
+
+	/**
+	 * Creates an index that reads the archive only. The bundled table
+	 * would answer first and hide the archive path these tests cover.
+	 *
+	 * @param archive the archive to read, or null for none
+	 * @param state   the state directory, or null for no disk cache
+	 * @return the index, never null
+	 */
+	private static JdkIndex archiveOnly(Path archive, Path state) {
+		return new JdkIndex(archive, state, JdkApiTable.empty());
+	}
+
+	/**
+	 * Returns the archive of the running JDK.
+	 *
+	 * @return the archive, never null
+	 */
+	private static Path defaultArchive() {
+		return Path.of(System.getProperty("java.home"), "lib", "ct.sym");
+	}
+
+	/**
+	 * Returns a table that covers one release only, so the archive
+	 * answers for every other release.
+	 *
+	 * @return the table, never null
+	 */
+	private static JdkApiTable partialTable() {
+		return JdkApiTable.parse(String.join("\n", List.of(
+				"# importtruth-jdk-api 1",
+				"# releases 8",
+				"# classes 1",
+				"java/util/List.class 8")) + "\n");
+	}
+
+	/**
+	 * Returns the newest release the bundled table covers.
+	 *
+	 * @return the release, never negative
+	 */
+	private static int newestCoveredRelease() {
+		return JdkApiTable.bundled().releases().stream()
+				.mapToInt(Integer::intValue)
+				.max()
+				.orElseThrow();
 	}
 
 	/**

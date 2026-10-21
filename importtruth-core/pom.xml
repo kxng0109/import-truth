@@ -14,6 +14,16 @@
   <name>importtruth-core</name>
   <description>Resolve, index, lookup, check. Adapters via ServiceLoader.</description>
 
+  <properties>
+    <!--
+      The JDK home the table of the documented API is generated from. It
+      is the build JDK by default. A build JDK without an archive, such
+      as a runtime image, names a home without one and the step skips
+      the table.
+    -->
+    <jdk.api.table.home>${java.home}</jdk.api.table.home>
+  </properties>
+
   <dependencies>
     <dependency>
       <groupId>io.github.kxng0109</groupId>
@@ -36,4 +46,69 @@
       <version>${assertj.version}</version>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.6.4</version>
+        <executions>
+          <execution>
+            <!--
+              The table of the documented JDK API is generated from the
+              archive of the build JDK, so a build that carries no JDK,
+              such as a native image, can still answer JDK questions.
+
+              The step runs after the compiler, because it runs the
+              class the compiler produced. It never fails the build: a
+              build JDK without an archive, or a failure while reading
+              it, skips the table, and the tool then answers from the
+              archive on disk or reports that the JDK surface could not
+              be consulted. Exit code 2 is the skip.
+            -->
+            <id>generate-jdk-api-table</id>
+            <phase>process-classes</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>${java.home}/bin/java</executable>
+              <arguments>
+                <argument>-classpath</argument>
+                <argument>${project.build.outputDirectory}</argument>
+                <argument>-Dimporttruth.jdk.home=${jdk.api.table.home}</argument>
+                <argument>io.github.kxng0109.importtruth.core.JdkApiTableGenerator</argument>
+                <argument>${project.basedir}/src/main/resources/jdk-api</argument>
+              </arguments>
+              <successCodes>
+                <successCode>0</successCode>
+                <successCode>2</successCode>
+              </successCodes>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <!--
+              The table is written into the source resources, so the
+              copy runs again after the generation. The phase comes
+              after the generation and before the tests, so the tests
+              and the jar carry the table of this build.
+            -->
+            <id>copy-jdk-api-table</id>
+            <phase>process-test-classes</phase>
+            <goals>
+              <goal>resources</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>

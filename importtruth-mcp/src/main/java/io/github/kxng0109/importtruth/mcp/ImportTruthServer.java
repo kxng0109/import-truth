@@ -112,6 +112,12 @@ public final class ImportTruthServer implements AutoCloseable {
 						.tool(suggestImportsTool.definition())
 						.callHandler((exchange, request) -> suggestImportsTool.call(request.arguments()))
 						.build());
+		AnalyzeDependenciesTool analyzeTool = new AnalyzeDependenciesTool(resolver);
+		server.addTool(
+				McpServerFeatures.SyncToolSpecification.builder()
+						.tool(analyzeTool.definition())
+						.callHandler((exchange, request) -> analyzeTool.call(request.arguments()))
+						.build());
 	}
 
 	private static McpSyncServer boot(PingService ping, InputStream in, OutputStream out) {

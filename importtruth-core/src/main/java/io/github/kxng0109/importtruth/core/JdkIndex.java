@@ -20,11 +20,18 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import java.util.zip.ZipFile;
 
 /**
  * Answers whether a name exists in the running JDK image. Records which
  * JDK answered, because the tool JDK may differ from the project JDK.
+ *
+ * <p>The documented API of a release comes from the bundled table
+ * first, because a build that carries no JDK, such as a native image,
+ * has no archive to read. A release the table does not cover falls
+ * back to the archive on disk, and a build with neither answers from
+ * the running image.
  */
 public final class JdkIndex {
 
@@ -47,6 +54,16 @@ public final class JdkIndex {
 	private final int runningRelease = Runtime.version().feature();
 	private final Path ctSym;
 	private final Path cacheDir;
+	private final JdkApiTable table;
+
+	/**
+	 * The release the current thread asked about last. Whether the JDK
+	 * surface can be consulted depends on the release, and the release
+	 * is asked before the availability is, on the same thread. The
+	 * index is shared between requests, so the release is kept per
+	 * thread.
+	 */
+	private final ThreadLocal<Integer> consulted = new ThreadLocal<>();
 
 	/**
 	 * Creates a least recently used cache: typo storms evict eldest
@@ -110,11 +127,40 @@ public final class JdkIndex {
 	 * @param modules  runtime image modules, never null
 	 */
 	JdkIndex(Path ctSym, Path stateDir, List<Path> modules) {
+		this(ctSym, stateDir, modules, JdkApiTable.bundled());
+	}
+
+	/**
+	 * Creates the index with an explicit table. The table is injectable
+	 * so a test can drive the paths a real build does not have.
+	 *
+	 * @param ctSym    the {@code ct.sym} archive, or null when this
+	 *                 build has none, as a native image does
+	 * @param stateDir tool state directory, or null for no disk cache
+	 * @param table    the table of the documented API, never null
+	 */
+	JdkIndex(Path ctSym, Path stateDir, JdkApiTable table) {
+		this(ctSym, stateDir, runningImageModules(), table);
+	}
+
+	/**
+	 * Creates the index with an explicit module list and table. A
+	 * native image has no runtime image filesystem, and a test has to
+	 * be able to drive that same shape.
+	 *
+	 * @param ctSym    the {@code ct.sym} archive, or null when this
+	 *                 build has none, as a native image does
+	 * @param stateDir tool state directory, or null for no disk cache
+	 * @param modules  runtime image modules, never null
+	 * @param table    the table of the documented API, never null
+	 */
+	JdkIndex(Path ctSym, Path stateDir, List<Path> modules, JdkApiTable table) {
 		this.ctSym = ctSym == null ? null : ctSym.toAbsolutePath().normalize();
 		this.cacheDir = stateDir == null
 				? null
 				: stateDir.toAbsolutePath().normalize().resolve("jdk");
 		this.modules = List.copyOf(modules);
+		this.table = table == null ? JdkApiTable.empty() : table;
 	}
 
 	/**
@@ -168,20 +214,25 @@ public final class JdkIndex {
 	/**
 	 * Reports whether this build can answer questions about the JDK API
 	 * at all. A native image has neither the runtime image filesystem
-	 * nor a {@code ct.sym}, so it cannot, and the tool must say that
-	 * instead of claiming a class is missing.
+	 * nor a {@code ct.sym}, so it answers the releases the bundled table
+	 * covers and nothing else, and the tool must say that for the
+	 * others instead of claiming a class is missing.
 	 *
 	 * @return true when the JDK API surface can be consulted
 	 */
 	public boolean available() {
-		return !modules.isEmpty() || ctSym != null;
+		if (!modules.isEmpty() || ctSym != null) {
+			return true;
+		}
+		Integer release = consulted.get();
+		return release != null && table.covers(release);
 	}
 
 	/**
 	 * Checks the name against the documented API of {@code release},
-	 * read from the running JDK's {@code ct.sym}. Falls back to the
-	 * running image when {@code release} is newer than the runtime
-	 * or no {@code ct.sym} is available.
+	 * read from the bundled table. Falls back to the running JDK's
+	 * {@code ct.sym} for a release the table does not cover, and to the
+	 * running image when there is no archive either.
 	 *
 	 * @param fqn     fully qualified name, never null
 	 * @param release target major release
@@ -190,19 +241,35 @@ public final class JdkIndex {
 	 */
 	public boolean existsIn(String fqn, int release) {
 		Objects.requireNonNull(fqn, "fqn");
+		consulted.set(release);
+		String dotted = fqn.replace('.', '/') + ".class";
+		if (table.covers(release)) {
+			return documented(name -> table.documents(name, release), dotted);
+		}
 		ReleaseIndex indexed = releaseIndex(release);
 		if (indexed == null) {
-			return exists(fqn);
+			return probeRuntime(fqn);
 		}
-		String dotted = fqn.replace('.', '/') + ".class";
-		if (indexed.classes().contains(dotted)) {
+		return documented(indexed.classes()::contains, dotted);
+	}
+
+	/**
+	 * Checks a class file name against the documented API, including
+	 * the nested type spellings.
+	 *
+	 * @param present tells whether a class file name is documented
+	 * @param dotted  the class file name, never null
+	 * @return true when a matching class file exists
+	 */
+	private static boolean documented(Predicate<String> present, String dotted) {
+		if (present.test(dotted)) {
 			return true;
 		}
 		String nested = dotted.substring(0, dotted.length() - ".class".length());
 		int slash;
 		while ((slash = nested.lastIndexOf('/')) > 0) {
 			nested = nested.substring(0, slash) + "$" + nested.substring(slash + 1);
-			if (indexed.classes().contains(nested + ".class")) {
+			if (present.test(nested + ".class")) {
 				return true;
 			}
 		}
@@ -218,6 +285,19 @@ public final class JdkIndex {
 	 */
 	public boolean exists(String fqn) {
 		Objects.requireNonNull(fqn, "fqn");
+		// The question names no release, so only the running image can
+		// answer it, and the JDK surface cannot be consulted for it.
+		consulted.remove();
+		return probeRuntime(fqn);
+	}
+
+	/**
+	 * Checks the name against the runtime image.
+	 *
+	 * @param fqn fully qualified name, never null
+	 * @return true when a matching class file exists
+	 */
+	private boolean probeRuntime(String fqn) {
 		return cache.computeIfAbsent(fqn, this::probe);
 	}
 
@@ -264,7 +344,10 @@ public final class JdkIndex {
 	 */
 	public boolean packageExists(String name) {
 		Objects.requireNonNull(name, "name");
-		return packageCache.computeIfAbsent(name, this::probePackage);
+		// The question names no release, so only the running image can
+		// answer it, and the JDK surface cannot be consulted for it.
+		consulted.remove();
+		return probeRuntimePackage(name);
 	}
 
 	private boolean probePackage(String name) {
@@ -272,10 +355,20 @@ public final class JdkIndex {
 	}
 
 	/**
+	 * Checks whether a package exists in the runtime image.
+	 *
+	 * @param name dotted package name, never null
+	 * @return true when some module holds the package directory
+	 */
+	private boolean probeRuntimePackage(String name) {
+		return packageCache.computeIfAbsent(name, this::probePackage);
+	}
+
+	/**
 	 * Checks whether a package exists in the documented API of
-	 * {@code release}. Falls back to the running image when
-	 * {@code release} is newer than the runtime or no {@code ct.sym}
-	 * is available.
+	 * {@code release}, read from the bundled table. Falls back to the
+	 * running JDK's {@code ct.sym} for a release the table does not
+	 * cover, and to the running image when there is no archive either.
 	 *
 	 * @param name    dotted package name, never null
 	 * @param release target major release
@@ -284,11 +377,16 @@ public final class JdkIndex {
 	 */
 	public boolean packageExistsIn(String name, int release) {
 		Objects.requireNonNull(name, "name");
+		consulted.set(release);
+		String path = name.replace('.', '/');
+		if (table.covers(release)) {
+			return table.hasPackage(path, release);
+		}
 		ReleaseIndex indexed = releaseIndex(release);
 		if (indexed == null) {
-			return packageExists(name);
+			return probeRuntimePackage(name);
 		}
-		return indexed.packages().contains(name.replace('.', '/'));
+		return indexed.packages().contains(path);
 	}
 
 	private ReleaseIndex releaseIndex(int release) {

@@ -41,6 +41,17 @@
       <version>${project.version}</version>
     </dependency>
     <dependency>
+      <!--
+        The real reference scanner and the real archive reader, so the
+        tests of this module exercise the shipped bytecode path and not
+        a double. Test scope only: the server never names an adapter.
+      -->
+      <groupId>io.github.kxng0109</groupId>
+      <artifactId>importtruth-adapter-java</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <version>${junit.version}</version>
