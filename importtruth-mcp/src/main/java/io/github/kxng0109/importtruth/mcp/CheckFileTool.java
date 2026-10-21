@@ -83,7 +83,9 @@ public final class CheckFileTool {
 	}
 
 	/**
-	 * Handles a check call. The rendered lines stay as they were; the
+	 * Handles a check call. The file path is resolved against the
+	 * project root first, so a path written relative to the project
+	 * finds its file. The rendered lines stay as they were; the
 	 * structured content carries the same answer for a machine, with
 	 * every finding spelled out. A file that could not be parsed
 	 * answers with an error, never with a verdict.
@@ -102,7 +104,9 @@ public final class CheckFileTool {
 		String projectPath = project.get();
 		String filePath = file.get();
 		try {
-			FileAnswer answer = checkFile(Paths.get(projectPath), Paths.get(filePath));
+			Path projectDir = Paths.get(projectPath);
+			Path source = ProjectPaths.resolve(projectDir, Paths.get(filePath));
+			FileAnswer answer = checkFile(projectDir, source);
 			List<String> lines = answer.lines().isEmpty() ? List.of("clean") : answer.lines();
 			return McpResults.ok(lines, structured(answer));
 		} catch (Exception failure) {

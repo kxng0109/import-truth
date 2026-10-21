@@ -19,6 +19,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarOutputStream;
@@ -348,6 +349,116 @@ final class CheckFileToolTest {
 		assertThat(structured).as("status").containsEntry("status", "ERROR");
 		assertThat(structured).as("file").containsEntry("file", broken.toString());
 		assertThat((String) structured.get("message")).as("message").contains("could not be parsed");
+	}
+
+	@Test
+	@DisplayName("accepts a path relative to the project")
+	void acceptsProjectRelativePath() throws Exception {
+		CheckFileTool tool = tool();
+		file("Clean.java", "package com.other; import java.util.List; public class Clean { List<String> items; }");
+		String relative = Paths.get("src", "main", "java", "com", "other", "Clean.java").toString();
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", relative));
+
+		assertThat(result.isError()).as("project relative path accepted").isFalse();
+		assertThat(textOf(result)).as("clean answer").isEqualTo("clean");
+	}
+
+	@Test
+	@DisplayName("keeps a working directory path that lands inside the project")
+	void keepsWorkingDirectoryPath() throws Exception {
+		Path scratch = workingDirectoryProject();
+		try {
+			CheckFileTool tool = tool();
+			Path source = scratch.resolve("src/main/java/com/other/Clean.java");
+			Files.write(source,
+					"package com.other; import java.util.List; public class Clean { List<String> items; }"
+							.getBytes(StandardCharsets.UTF_8));
+			Path shadow = scratch.resolve("target/importtruth-cwd-project/src/main/java/com/other/Clean.java");
+			Files.createDirectories(shadow.getParent());
+			Files.write(shadow,
+					"package com.other;\nimport org.example.Nope;\npublic class Clean { Nope nope; }"
+							.getBytes(StandardCharsets.UTF_8));
+			String relative = Paths.get("").toAbsolutePath().relativize(source).toString();
+
+			CallToolResult result = tool.call(Map.of("projectPath", scratch.toString(), "filePath", relative));
+
+			assertThat(result.isError()).as("working directory path accepted").isFalse();
+			assertThat(textOf(result)).as("the working directory file wins").isEqualTo("clean");
+			assertThat(structuredOf(result)).as("the file stays as asked").containsEntry("file", relative);
+		} finally {
+			deleteTree(scratch);
+		}
+	}
+
+	@Test
+	@DisplayName("rejects a relative path that leaves the project")
+	void rejectsEscapingRelativePath() throws Exception {
+		CheckFileTool tool = tool();
+		String escaping = Paths.get("..", "outside", "Nope.java").toString();
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", escaping));
+
+		assertThat(result.isError()).as("escaping path flagged").isTrue();
+		assertThat(((TextContent) result.content().get(0)).text())
+				.as("names the violation")
+				.contains("outside the project");
+	}
+
+	@Test
+	@DisplayName("keeps the answer of a file that already worked")
+	void keepsAnswerShape() throws Exception {
+		CheckFileTool tool = tool();
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", missing.toString()));
+
+		assertThat(textOf(result)).as("rendered line").isEqualTo(
+				"src/main/java/com/other/Missing.java:2 MISSING import org.example.Nope resolves nowhere");
+		assertThat(structuredOf(result)).as("structured content").isEqualTo(Map.of(
+				"status", "FINDINGS",
+				"file", missing.toString(),
+				"findingCount", 1,
+				"findings", List.of(Map.of(
+						"kind", "MISSING",
+						"resolved", false,
+						"line", 2,
+						"text", "import org.example.Nope resolves nowhere"))));
+	}
+
+	/**
+	 * Creates a project under the process working directory, so a path
+	 * relative to the working directory lands inside it. The project is
+	 * scratch: the test removes it again.
+	 *
+	 * @return the scratch project root, never null
+	 * @throws IOException when the scratch project cannot be written
+	 */
+	private Path workingDirectoryProject() throws IOException {
+		Path scratch = Paths.get("").toAbsolutePath().resolve("target").resolve("importtruth-cwd-project");
+		deleteTree(scratch);
+		Files.createDirectories(scratch.resolve("src/main/java/com/other"));
+		return scratch;
+	}
+
+	/**
+	 * Removes a directory tree, if it is there.
+	 *
+	 * @param root tree to remove, never null
+	 * @throws IOException when the tree cannot be removed
+	 */
+	private static void deleteTree(Path root) throws IOException {
+		if (!Files.exists(root)) {
+			return;
+		}
+		List<Path> paths;
+		try (var walk = Files.walk(root)) {
+			paths = walk.sorted(Comparator.reverseOrder()).toList();
+		}
+		for (Path path : paths) {
+			Files.deleteIfExists(path);
+		}
 	}
 
 	private CheckFileTool tool() {

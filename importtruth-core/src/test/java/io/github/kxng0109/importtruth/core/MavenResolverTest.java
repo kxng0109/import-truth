@@ -32,6 +32,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
@@ -987,6 +989,31 @@ final class MavenResolverTest {
 
 		assertThat(chosen.command()).as("the unix system launcher").containsExactly("mvn");
 		assertThat(chosen.description()).as("the reason names the launcher").contains("system mvn");
+	}
+
+	@Test
+	@EnabledOnOs(OS.WINDOWS)
+	@DisplayName("never uses a wrapper reached through a junction inside the project")
+	void ignoresWrapperReachedThroughJunction() throws Exception {
+		Path staging = FileCheckServiceTest.staging("maven-junction");
+		Path root = Files.createDirectories(staging.resolve("project"));
+		Path outside = Files.createDirectories(staging.resolve("outside"));
+		Path wrapper = outside.resolve("mvnw.cmd");
+		Files.write(wrapper, "x".getBytes(StandardCharsets.UTF_8));
+		Path link = root.resolve("link");
+		boolean survived = false;
+		try {
+			FileCheckServiceTest.junction(link, outside);
+
+			assertThat(MavenResolver.findWrapper(link, root, true))
+					.as("the wrapper reached through the junction is not used")
+					.isNull();
+		} finally {
+			FileCheckServiceTest.removeJunction(link);
+			survived = Files.exists(wrapper);
+			FileCheckServiceTest.deleteTree(staging);
+		}
+		assertThat(survived).as("the junction target survived the cleanup").isTrue();
 	}
 
 	@Test

@@ -8,11 +8,12 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.util.AbstractSet;
-import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -30,27 +31,43 @@ import java.util.stream.Stream;
  * A directory counts as a package only when it holds compiled classes or
  * sources, never from bare directory existence.
  *
+ * <p>Every module of the project contributes its packages, the project
+ * root included. A class of a sibling module is a class of this project,
+ * so an import of it is a candidate and never a miss.
+ *
  * <p>The result is memoised per project directory, because the walk it
  * needs is repeated work on every tool call. The memo is dropped when the
  * project's build definition changes: every build file the project
  * declares, nested modules included, is watched by size and modification
- * time, and a change to any of them rebuilds the set.
+ * time, and a change to any of them rebuilds the set. The module tree
+ * itself belongs to that definition, so a module that was added or
+ * removed rebuilds the set as well.
  *
  * <p>The rule has a boundary, and it is deliberate: a change to the
- * source tree alone, a package directory added or removed without a
- * change to any build file, is not seen until the build definition
- * changes. The boundary is safe in the direction that matters, because
- * a package that no longer exists is verified on demand before it is
- * allowed to resolve an import. The other direction, a package that
+ * source tree alone, a package directory added or removed inside a
+ * module without a change to any build file, is not seen until the build
+ * definition changes. The boundary is safe in the direction that matters,
+ * because a package that no longer exists is verified on demand before it
+ * is allowed to resolve an import. The other direction, a package that
  * appeared, can only cost a candidate verdict, never a wrong one.
  */
 public final class ProjectPackages {
 
 	/**
-	 * The source and output roots a project's own packages come from.
+	 * The source and output roots a module's own packages come from.
 	 */
 	private static final List<String> ROOTS =
 			List.of("src/main/java", "src/test/java", "target/classes", "target/test-classes");
+
+	/**
+	 * The roots of a module that hold sources.
+	 */
+	private static final List<String> SOURCE_ROOTS = List.of("src/main/java", "src/test/java");
+
+	/**
+	 * The roots of a module that hold compiled classes.
+	 */
+	private static final List<String> CLASS_ROOTS = List.of("target/classes", "target/test-classes");
 
 	/**
 	 * Maximum retained project contexts. A long session touches more
@@ -241,14 +258,13 @@ public final class ProjectPackages {
 	}
 
 	/**
-	 * The own packages of one project, and the build files that decide
-	 * whether they are still true.
+	 * The own packages of one project, and the build definition that
+	 * decides whether they are still true.
 	 */
 	private static final class Context {
 
 		private final Path projectDir;
 		private final Set<String> packages;
-		private final List<Path> poms;
 		private final String build;
 
 		/**
@@ -259,16 +275,19 @@ public final class ProjectPackages {
 		 */
 		private Context(Path projectDir) throws IOException {
 			this.projectDir = projectDir;
+			List<Path> modules = moduleRoots(projectDir);
 			Set<String> found = new HashSet<>();
-			for (String root : List.of("src/main/java", "src/test/java")) {
-				collectByExtension(projectDir.resolve(root), found, ".java");
+			Map<String, Set<Path>> owners = new HashMap<>();
+			for (Path module : modules) {
+				for (String root : SOURCE_ROOTS) {
+					collectByExtension(module.resolve(root), found, ".java", module, owners);
+				}
+				for (String root : CLASS_ROOTS) {
+					collectByExtension(module.resolve(root), found, ".class", module, owners);
+				}
 			}
-			for (String root : List.of("target/classes", "target/test-classes")) {
-				collectByExtension(projectDir.resolve(root), found, ".class");
-			}
-			this.packages = new OwnPackages(Set.copyOf(found), this);
-			this.poms = declaredPoms(projectDir);
-			this.build = signature();
+			this.packages = new OwnPackages(Set.copyOf(found), owners, this);
+			this.build = signatureOf(modules);
 		}
 
 		/**
@@ -281,24 +300,15 @@ public final class ProjectPackages {
 		}
 
 		/**
-		 * The signature of the build definition, read now. A build
-		 * file that vanished reads as changed, never as unchanged.
+		 * The signature of the build definition, read now. The module
+		 * tree belongs to the definition, so a module that was added or
+		 * removed reads as changed, and a build file that vanished reads
+		 * as changed, never as unchanged.
 		 *
 		 * @return the signature, never null
 		 */
 		private String signature() {
-			StringBuilder key = new StringBuilder();
-			for (Path pom : poms) {
-				key.append(pom.toAbsolutePath()).append(':');
-				Stamp stamp = Stamp.of(pom);
-				if (stamp == null) {
-					key.append("gone");
-				} else {
-					key.append(stamp.size()).append('@').append(stamp.modified().to(TimeUnit.NANOSECONDS));
-				}
-				key.append('\n');
-			}
-			return key.toString();
+			return signatureOf(moduleRoots(projectDir));
 		}
 
 		/**
@@ -318,16 +328,19 @@ public final class ProjectPackages {
 	private static final class OwnPackages extends AbstractSet<String> {
 
 		private final Set<String> names;
+		private final Map<String, Set<Path>> owners;
 		private final Context context;
 
 		/**
 		 * Creates the set.
 		 *
 		 * @param names   package names, never null
+		 * @param owners  the modules each package was found in, never null
 		 * @param context the project they came from, never null
 		 */
-		private OwnPackages(Set<String> names, Context context) {
+		private OwnPackages(Set<String> names, Map<String, Set<Path>> owners, Context context) {
 			this.names = names;
+			this.owners = owners;
 			this.context = context;
 		}
 
@@ -356,16 +369,20 @@ public final class ProjectPackages {
 		}
 
 		/**
-		 * Tests whether a package still holds sources.
+		 * Tests whether a package still holds sources. A package of a
+		 * module is looked for in the roots of the module it was found
+		 * in, so a sibling module's package is proved where it lives.
 		 *
 		 * @param pkg dotted package name, never null
 		 * @return true when a root still holds sources for the package
 		 */
 		private boolean holds(String pkg) {
 			String relative = pkg.replace('.', '/');
-			for (String root : ROOTS) {
-				if (holdsSources(context.projectDir.resolve(root).resolve(relative))) {
-					return true;
+			for (Path module : owners.getOrDefault(pkg, Set.of())) {
+				for (String root : ROOTS) {
+					if (holdsSources(module.resolve(root).resolve(relative))) {
+						return true;
+					}
 				}
 			}
 			return false;
@@ -416,58 +433,84 @@ public final class ProjectPackages {
 	}
 
 	/**
-	 * The build files a project declares, nested modules included.
+	 * The directories of a project's modules, the project root first.
+	 * The root is a module of its own: a project that keeps sources in
+	 * its own source roots owns them, build file or not.
 	 *
 	 * @param projectDir project root, never null
-	 * @return the build files, never null
+	 * @return the module directories, never null
 	 */
-	private static List<Path> declaredPoms(Path projectDir) {
-		List<Path> poms = new ArrayList<>();
-		collectPoms(projectDir, poms, 0);
-		return List.copyOf(poms);
+	private static List<Path> moduleRoots(Path projectDir) {
+		Set<Path> modules = new LinkedHashSet<>();
+		modules.add(projectDir);
+		collectModules(projectDir, modules, 0);
+		return List.copyOf(modules);
 	}
 
 	/**
-	 * Collects the build files of a module and of the modules it
+	 * Collects the module directories of a module and of the modules it
 	 * declares. The module list follows the resolver's own reading of
 	 * a project, so the token sees at least what the resolver sees.
 	 *
-	 * @param module module directory, never null
-	 * @param poms   collected build files, never null
-	 * @param depth  current depth, never negative
+	 * @param module  module directory, never null
+	 * @param modules collected module directories, never null
+	 * @param depth   current depth, never negative
 	 */
-	private static void collectPoms(Path module, List<Path> poms, int depth) {
+	private static void collectModules(Path module, Set<Path> modules, int depth) {
 		if (depth > MavenResolver.MAX_POM_DEPTH) {
 			return;
 		}
-		Path pom = module.resolve("pom.xml");
-		if (Files.isRegularFile(pom) && !poms.contains(pom)) {
-			poms.add(pom);
-		}
-		List<Path> modules;
+		List<Path> children;
 		try {
-			modules = MavenResolver.modulesOf(module);
+			children = MavenResolver.modulesOf(module);
 		} catch (IOException unreadable) {
 			return;
 		}
-		for (Path child : modules) {
-			if (child.equals(module)) {
+		for (Path child : children) {
+			if (child.equals(module) || modules.contains(child)) {
 				continue;
 			}
-			collectPoms(child, poms, depth + 1);
+			modules.add(child);
+			collectModules(child, modules, depth + 1);
 		}
 	}
 
 	/**
-	 * Collects the packages of one root.
+	 * The signature of a module tree: every module, with the size and
+	 * modification time of its build file. A module that was added or
+	 * removed changes the tree, so it changes the signature.
+	 *
+	 * @param modules module directories, never null
+	 * @return the signature, never null
+	 */
+	private static String signatureOf(List<Path> modules) {
+		StringBuilder key = new StringBuilder();
+		for (Path module : modules) {
+			key.append(module.toAbsolutePath()).append(':');
+			Stamp stamp = Stamp.of(module.resolve("pom.xml"));
+			if (stamp == null) {
+				key.append("gone");
+			} else {
+				key.append(stamp.size()).append('@').append(stamp.modified().to(TimeUnit.NANOSECONDS));
+			}
+			key.append('\n');
+		}
+		return key.toString();
+	}
+
+	/**
+	 * Collects the packages of one root, and the module the root belongs
+	 * to.
 	 *
 	 * @param root      source or output root, never null
 	 * @param packages  collected packages, never null
 	 * @param extension file extension to look for, never null
+	 * @param module    module the root belongs to, never null
+	 * @param owners    the modules each package was found in, never null
 	 * @throws IOException when directories cannot be walked
 	 */
-	private static void collectByExtension(Path root, Set<String> packages, String extension)
-			throws IOException {
+	private static void collectByExtension(Path root, Set<String> packages, String extension,
+			Path module, Map<String, Set<Path>> owners) throws IOException {
 		if (!Files.isDirectory(root)) {
 			return;
 		}
@@ -476,7 +519,10 @@ public final class ProjectPackages {
 			walk.filter(p -> p.toString().endsWith(extension))
 					.map(p -> root.relativize(p.getParent()))
 					.map(ProjectPackages::dotted)
-					.forEach(packages::add);
+					.forEach(pkg -> {
+						packages.add(pkg);
+						owners.computeIfAbsent(pkg, key -> new LinkedHashSet<>()).add(module);
+					});
 		}
 	}
 

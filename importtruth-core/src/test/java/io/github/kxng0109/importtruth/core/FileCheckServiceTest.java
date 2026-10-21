@@ -17,15 +17,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarOutputStream;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -294,6 +298,88 @@ final class FileCheckServiceTest {
 	}
 
 	@Test
+	@DisplayName("rejects a sibling directory that shares the project prefix")
+	void rejectsSiblingWithSharedPrefix() throws Exception {
+		FileCheckService check = service();
+		Path sibling = project.resolveSibling(project.getFileName().toString() + "-sibling");
+		Path file = sibling.resolve("com/example/Sibling.java");
+		Files.createDirectories(file.getParent());
+		Files.write(file, "package com.example; public class Sibling { }".getBytes(StandardCharsets.UTF_8));
+		try {
+			assertThatThrownBy(() -> check.check(project, file))
+					.as("the sibling file is rejected")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("outside the project");
+		} finally {
+			deleteTree(sibling);
+		}
+	}
+
+	@Test
+	@DisplayName("rejects a file that is not there")
+	void rejectsMissingFile() throws Exception {
+		FileCheckService check = service();
+		Path missing = project.resolve("src/main/java/com/example/Missing.java");
+
+		assertThatThrownBy(() -> check.check(project, missing))
+				.as("a missing file is an error")
+				.isInstanceOf(IOException.class)
+				.hasMessageContaining("does not exist");
+	}
+
+	@Test
+	@DisplayName("rejects a project root that is not there")
+	void rejectsMissingProjectRoot() throws Exception {
+		FileCheckService check = service();
+		Path root = project.resolveSibling(project.getFileName().toString() + "-absent");
+		Path file = root.resolve("com/example/Absent.java");
+
+		assertThatThrownBy(() -> check.check(root, file))
+				.as("a missing project root is an error")
+				.isInstanceOf(IOException.class)
+				.hasMessageContaining("does not exist");
+	}
+
+	@Test
+	@EnabledOnOs(OS.WINDOWS)
+	@DisplayName("rejects a file reached through a junction inside the project")
+	void rejectsFileReachedThroughJunction() throws Exception {
+		Path staging = staging("file-check-junction");
+		Path root = Files.createDirectories(staging.resolve("project"));
+		Path outside = Files.createDirectories(staging.resolve("outside"));
+		Path secret = outside.resolve("Secret.java");
+		Files.write(secret, "package secret; import org.example.Nope; public class Secret { }"
+				.getBytes(StandardCharsets.UTF_8));
+		Path inside = root.resolve("src/main/java/com/example/Secret.java");
+		Files.createDirectories(inside.getParent());
+		Files.write(inside, "package com.example; import java.util.List; public class Secret { }"
+				.getBytes(StandardCharsets.UTF_8));
+		Path link = root.resolve("link");
+		boolean survived = false;
+		try {
+			junction(link, outside);
+			FileCheckService check = service();
+
+			assertThatThrownBy(() -> check.check(root, link.resolve("Secret.java")))
+					.as("the file reached through the junction is rejected")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("outside the project");
+
+			assertThat(check.check(root, inside).healthy())
+					.as("the same file by its real path inside the project is accepted")
+					.isTrue();
+			assertThat(check.check(root, inside.toAbsolutePath()).healthy())
+					.as("the same file by its absolute real path is accepted")
+					.isTrue();
+		} finally {
+			removeJunction(link);
+			survived = Files.exists(secret);
+			deleteTree(staging);
+		}
+		assertThat(survived).as("the junction target survived the cleanup").isTrue();
+	}
+
+	@Test
 	@DisplayName("checks a batch with the answers of the single file path")
 	void checksBatchLikeSingleFiles() throws Exception {
 		FileCheckService check = service();
@@ -387,6 +473,80 @@ final class FileCheckServiceTest {
 		Files.createDirectories(file.getParent());
 		Files.write(file, content.getBytes(StandardCharsets.UTF_8));
 		return file;
+	}
+
+	/**
+	 * Creates a directory junction. A junction needs no privilege, and
+	 * the JDK resolves one to its target, so a path spelled inside the
+	 * project can name a file outside it.
+	 *
+	 * @param link   junction to create, never null
+	 * @param target directory the junction points at, never null
+	 * @throws IOException when the junction cannot be created
+	 * @throws InterruptedException when the command is interrupted
+	 */
+	static void junction(Path link, Path target) throws IOException, InterruptedException {
+		Process process = new ProcessBuilder("cmd", "/d", "/c", "mklink", "/J",
+				link.toString(), target.toString())
+				.redirectErrorStream(true)
+				.start();
+		String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+		if (process.waitFor() != 0) {
+			throw new IOException("mklink /J failed: " + output.trim());
+		}
+	}
+
+	/**
+	 * Removes a junction without touching its target. A recursive
+	 * delete would follow the junction into the target, so the junction
+	 * is removed the way Windows removes it.
+	 *
+	 * @param link junction to remove, never null
+	 * @throws IOException when the junction cannot be removed
+	 * @throws InterruptedException when the command is interrupted
+	 */
+	static void removeJunction(Path link) throws IOException, InterruptedException {
+		Process process = new ProcessBuilder("cmd", "/d", "/c", "rmdir", link.toString())
+				.redirectErrorStream(true)
+				.start();
+		String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+		if (process.waitFor() != 0) {
+			throw new IOException("rmdir failed: " + output.trim());
+		}
+	}
+
+	/**
+	 * The directory a junction test stages its files in. It sits under
+	 * the .tmp folder of the repository, so a test that fails half way
+	 * leaves its files where they can be found and removed. The target
+	 * of the junction is a sibling of the project inside that folder,
+	 * so even a mistaken recursive delete can only reach scratch
+	 * files.
+	 *
+	 * @param name name of the staging directory, never null
+	 * @return the staging directory, never null
+	 * @throws IOException when the staging directory cannot be created
+	 */
+	static Path staging(String name) throws IOException {
+		Path repository = Paths.get(System.getProperty("user.dir")).getParent();
+		Path staging = repository.resolve(".tmp").resolve(name);
+		Files.createDirectories(staging);
+		return staging;
+	}
+
+	/**
+	 * Removes a directory tree, if it is there.
+	 *
+	 * @param root tree to remove, never null
+	 */
+	static void deleteTree(Path root) {
+		try (Stream<Path> walk = Files.walk(root)) {
+			for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+				Files.deleteIfExists(path);
+			}
+		} catch (IOException ignored) {
+			// Best effort: the staging area is disposable.
+		}
 	}
 
 	/** Canned dependency symbols, no bytecode involved. */

@@ -75,10 +75,13 @@ public final class CheckFilesTool {
 	}
 
 	/**
-	 * Handles a batch check call. One resolver, index, or pack failure fails
-	 * the whole call with {@code isError=true}; invalid items become inline
-	 * {@code ERROR} lines, so an all-invalid list returns success carrying
-	 * only {@code ERROR} lines. Clean files render as {@code "clean: <path>"}.
+	 * Handles a batch check call. Every file is resolved against the
+	 * project root on its own, so one path written relative to the
+	 * project finds its file without touching the others. One
+	 * resolver, index, or pack failure fails the whole call with
+	 * {@code isError=true}; invalid items become inline {@code ERROR}
+	 * lines, so an all-invalid list returns success carrying only
+	 * {@code ERROR} lines. Clean files render as {@code "clean: <path>"}.
 	 * The structured content holds one answer per requested file, in request
 	 * order, each with the findings of that file.
 	 *
@@ -103,29 +106,36 @@ public final class CheckFilesTool {
 			return McpResults.err(message, McpResults.failure(message));
 		}
 		String projectPath = project.get();
-		List<Path> valid = new ArrayList<>();
 		List<String> lines = new ArrayList<>();
 		List<Request> requests = new ArrayList<>();
-		for (Object item : files) {
-			if (!McpArgs.usableItem(item)) {
-				lines.add("ERROR file path must be a non-blank single-line string");
-				requests.add(new Request(null, "file path must be a non-blank single-line string"));
-				continue;
-			}
-			String filePath = (String) item;
-			try {
-				Path path = Paths.get(filePath);
-				valid.add(path);
-				requests.add(new Request(path, null));
-			} catch (InvalidPathException invalid) {
-				lines.add("ERROR invalid file path: " + filePath);
-				requests.add(new Request(null, "invalid file path: " + filePath));
-			}
-		}
 		try {
+			List<Path> valid = new ArrayList<>();
+			Path projectDir = null;
+			for (Object item : files) {
+				if (!McpArgs.usableItem(item)) {
+					lines.add("ERROR file path must be a non-blank single-line string");
+					requests.add(new Request(null, "file path must be a non-blank single-line string"));
+					continue;
+				}
+				String filePath = (String) item;
+				Path path;
+				try {
+					path = Paths.get(filePath);
+				} catch (InvalidPathException invalid) {
+					lines.add("ERROR invalid file path: " + filePath);
+					requests.add(new Request(null, "invalid file path: " + filePath));
+					continue;
+				}
+				if (projectDir == null) {
+					projectDir = Paths.get(projectPath);
+				}
+				Path source = ProjectPaths.resolve(projectDir, path);
+				valid.add(source);
+				requests.add(new Request(source, null));
+			}
 			Map<Path, CheckFileTool.FileAnswer> answers = valid.isEmpty()
 					? Map.of()
-					: check.checkFiles(Paths.get(projectPath), valid);
+					: check.checkFiles(projectDir, valid);
 			for (Map.Entry<Path, CheckFileTool.FileAnswer> entry : answers.entrySet()) {
 				if (entry.getValue().lines().isEmpty()) {
 					lines.add("clean: " + entry.getKey());

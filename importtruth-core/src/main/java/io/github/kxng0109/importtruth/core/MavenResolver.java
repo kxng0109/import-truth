@@ -617,6 +617,11 @@ public final class MavenResolver implements DependencyResolver {
 	 * project root: a wrapper above it belongs to another project, and
 	 * its properties file can point a download at an arbitrary URL.
 	 *
+	 * <p>The wrapper that is used is judged on the resolved paths, so a
+	 * junction inside the project cannot surface a wrapper that really
+	 * lives outside it. The path that is returned is the one that was
+	 * asked for, not the resolved one.</p>
+	 *
 	 * @param module      module being resolved, never null
 	 * @param projectRoot project root, never null
 	 * @param windows     true on Windows
@@ -627,7 +632,7 @@ public final class MavenResolver implements DependencyResolver {
 		Path current = module.toAbsolutePath().normalize();
 		while (current != null && current.startsWith(root)) {
 			Path wrapper = current.resolve(windows ? "mvnw.cmd" : "mvnw");
-			if (Files.exists(wrapper)) {
+			if (Files.exists(wrapper) && PathConfinement.contains(projectRoot, wrapper)) {
 				return wrapper;
 			}
 			if (current.equals(root)) {

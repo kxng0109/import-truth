@@ -19,6 +19,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -309,6 +310,47 @@ final class BatchToolsTest {
 		assertThat(result.isError()).as("resolver failure fails the call").isTrue();
 		assertThat(structured).as("status").containsEntry("status", "ERROR");
 		assertThat((String) structured.get("message")).as("message").contains("check failed");
+	}
+
+	@Test
+	@DisplayName("resolves every file of a batch on its own")
+	void resolvesBatchFilesIndependently() throws Exception {
+		Path clean = file("Clean.java",
+				"package com.other; import java.util.List; public class Clean { List<String> items; }");
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+		String relative = Paths.get("src", "main", "java", "com", "other", "Missing.java").toString();
+		CheckFilesTool check = filesTool();
+
+		CallToolResult result = check.call(Map.of("projectPath", project.toString(),
+				"filePaths", List.of(clean.toString(), relative, missing.toString())));
+		List<Map<String, Object>> answers = listOf(structuredOf(result), "results");
+
+		assertThat(answers).as("one answer per requested file").hasSize(3);
+		assertThat(answers.get(0)).as("first file").containsEntry("status", "CLEAN");
+		assertThat(answers.get(0)).as("first file path").containsEntry("file", clean.toString());
+		assertThat(answers.get(1)).as("middle file resolved on its own").containsEntry("status", "FINDINGS");
+		assertThat(answers.get(1)).as("middle file points at the project file")
+				.containsEntry("file", project.resolve(relative).toString());
+		assertThat(answers.get(2)).as("last file").containsEntry("status", "FINDINGS");
+		assertThat(answers.get(2)).as("last file path").containsEntry("file", missing.toString());
+	}
+
+	@Test
+	@DisplayName("keeps failing a batch that names a file nowhere")
+	void keepsFailingBatchWithUnknownFile() throws Exception {
+		Path clean = file("Clean.java",
+				"package com.other; import java.util.List; public class Clean { List<String> items; }");
+		String unknown = Paths.get("src", "main", "java", "com", "other", "Nope.java").toString();
+		CheckFilesTool check = filesTool();
+
+		CallToolResult result = check.call(Map.of("projectPath", project.toString(),
+				"filePaths", List.of(clean.toString(), unknown)));
+
+		assertThat(result.isError()).as("unknown file fails the batch").isTrue();
+		assertThat(((TextContent) result.content().get(0)).text())
+				.as("names the violation")
+				.contains("outside the project");
 	}
 
 	private Services services() throws Exception {

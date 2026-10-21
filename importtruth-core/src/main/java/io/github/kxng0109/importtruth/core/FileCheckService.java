@@ -66,16 +66,18 @@ public final class FileCheckService {
 	 * @param projectDir project root, never null
 	 * @param file       source file, never null
 	 * @return the outcome, never null
-	 * @throws IOException when resolution or indexing fails
+	 * @throws IOException when the file lies outside the project, is
+	 *                     missing, or the resolution or indexing fails
 	 */
 	public CheckResult check(Path projectDir, Path file) throws IOException {
 		Objects.requireNonNull(projectDir, "projectDir");
 		Objects.requireNonNull(file, "file");
-		requireInside(projectDir, file);
+		Path resolved = PathConfinement.resolve(projectDir, file);
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
 		Set<String> own = ProjectPackages.of(projectDir);
-		return checkWith(projectDir, file, dbs, own);
+		return verdict(projectDir, file, dbs, own, JdkTarget.of(projectDir).orElse(-1),
+				JavaImports.of(resolved));
 	}
 
 	/**
@@ -86,7 +88,8 @@ public final class FileCheckService {
 	 * @param dbs        index files, never null
 	 * @param own        own-project packages, never null
 	 * @return the outcome, never null
-	 * @throws IOException when index reads fail
+	 * @throws IOException when the file lies outside the project, is
+	 *                     missing, or the index reads fail
 	 */
 	public CheckResult checkWith(Path projectDir, Path file, List<Path> dbs, Set<String> own)
 			throws IOException {
@@ -94,8 +97,9 @@ public final class FileCheckService {
 		Objects.requireNonNull(file, "file");
 		Objects.requireNonNull(dbs, "dbs");
 		Objects.requireNonNull(own, "own");
-		requireInside(projectDir, file);
-		return verdict(projectDir, file, dbs, own, JdkTarget.of(projectDir).orElse(-1), JavaImports.of(file));
+		Path resolved = PathConfinement.resolve(projectDir, file);
+		return verdict(projectDir, file, dbs, own, JdkTarget.of(projectDir).orElse(-1),
+				JavaImports.of(resolved));
 	}
 
 	/**
@@ -104,12 +108,16 @@ public final class FileCheckService {
 	 * pays the compiler setup once instead of once per file. Every file
 	 * gets the answer the single file path gives it.
 	 *
+	 * <p>The file that is parsed is the resolved file, so the file that
+	 * is read is the file the containment check accepted.</p>
+	 *
 	 * @param projectDir project root, never null
 	 * @param files      source files, never null
 	 * @param dbs        index files, never null
 	 * @param own        own-project packages, never null
 	 * @return the outcome per file, in request order, never null
-	 * @throws IOException when index reads fail
+	 * @throws IOException when a file lies outside the project, is
+	 *                     missing, or the index reads fail
 	 */
 	public Map<Path, CheckResult> checkAll(
 			Path projectDir, List<Path> files, List<Path> dbs, Set<String> own)
@@ -118,15 +126,19 @@ public final class FileCheckService {
 		Objects.requireNonNull(files, "files");
 		Objects.requireNonNull(dbs, "dbs");
 		Objects.requireNonNull(own, "own");
+		Map<Path, Path> resolved = new LinkedHashMap<>();
+		List<Path> reads = new ArrayList<>(files.size());
 		for (Path file : files) {
 			Objects.requireNonNull(file, "file");
-			requireInside(projectDir, file);
+			Path real = PathConfinement.resolve(projectDir, file);
+			resolved.put(file, real);
+			reads.add(real);
 		}
-		Map<Path, ImportScan> scans = JavaImports.ofAll(files);
+		Map<Path, ImportScan> scans = JavaImports.ofAll(reads);
 		int target = JdkTarget.of(projectDir).orElse(-1);
 		Map<Path, CheckResult> results = new LinkedHashMap<>();
 		for (Path file : files) {
-			results.put(file, verdict(projectDir, file, dbs, own, target, scans.get(file)));
+			results.put(file, verdict(projectDir, file, dbs, own, target, scans.get(resolved.get(file))));
 		}
 		return results;
 	}
@@ -211,13 +223,6 @@ public final class FileCheckService {
 		return Optional.of(
 				new Finding(display, (int) ref.line(), FindingKind.MISSING,
 						"package " + ref.target() + " resolves nowhere", suggestion(dbs, ref.target())));
-	}
-
-	private static void requireInside(Path projectDir, Path file) throws IOException {
-		Path root = projectDir.toAbsolutePath().normalize();
-		if (!file.toAbsolutePath().normalize().startsWith(root)) {
-			throw new IOException("File is outside the project: " + file);
-		}
 	}
 
 	private static boolean isOwnOrGenerated(Set<String> own, String name) {
