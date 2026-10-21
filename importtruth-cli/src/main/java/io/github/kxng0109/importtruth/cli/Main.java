@@ -9,6 +9,9 @@ import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.mcp.ImportTruthServer;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
 
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -38,7 +41,7 @@ public final class Main {
 		LibraryIndexer indexer = ServiceLoader.load(LibraryIndexer.class).findFirst().orElseThrow(
 				() -> new IllegalStateException("No LibraryIndexer on the classpath"));
 		MavenResolver resolver = new MavenResolver(state);
-		JdkIndex jdk = new JdkIndex();
+		JdkIndex jdk = new JdkIndex(state);
 		if (args.length >= 3 && "check".equals(args[0])) {
 			CheckCommand command = new CheckCommand(store, indexer, resolver, jdk);
 			Path project = Paths.get(args[1]);
@@ -57,14 +60,47 @@ public final class Main {
 		PingService ping = new PingService("importtruth", version());
 		LookupService lookup = new LookupService(store, indexer, resolver, jdk);
 		SearchService search = new SearchService(store, indexer, resolver);
-		ImportTruthServer server = new ImportTruthServer(ping, lookup, search, store, indexer, resolver, jdk,
-				System.in, protocolOut);
 		CountDownLatch stop = new CountDownLatch(1);
 		Runtime.getRuntime().addShutdownHook(new Thread(stop::countDown));
+		ImportTruthServer server = new ImportTruthServer(ping, lookup, search, store, indexer, resolver, jdk,
+				new EofAwareInputStream(System.in, stop), protocolOut);
 		try {
 			stop.await();
 		} finally {
 			server.close();
+		}
+	}
+
+	/**
+	 * Notices the end of the client's input. A client that closes the
+	 * pipe expects the server to stop, not to linger as an idle
+	 * process until something kills it.
+	 */
+	static final class EofAwareInputStream extends FilterInputStream {
+
+		private final CountDownLatch stop;
+
+		EofAwareInputStream(InputStream in, CountDownLatch stop) {
+			super(in);
+			this.stop = stop;
+		}
+
+		@Override
+		public int read() throws IOException {
+			int value = super.read();
+			if (value < 0) {
+				stop.countDown();
+			}
+			return value;
+		}
+
+		@Override
+		public int read(byte[] buffer, int offset, int length) throws IOException {
+			int count = super.read(buffer, offset, length);
+			if (count < 0) {
+				stop.countDown();
+			}
+			return count;
 		}
 	}
 

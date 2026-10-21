@@ -60,19 +60,20 @@ public final class LookupService {
 		Objects.requireNonNull(symbol, "symbol");
 		String name = plainSymbol(symbol);
 		if (name.isBlank()) {
-			return new LookupResult(false, Confidence.CANDIDATE, List.of(), List.of(), false);
+			return new LookupResult(false, Confidence.CANDIDATE, List.of(), List.of(), false, jdk.available());
 		}
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
-		List<Symbol> matches = store.findAcross(dbs, name);
+		List<Symbol> matches = CheckOrchestrator.findBoth(store, dbs, name);
 		if (!matches.isEmpty()) {
-			return new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false);
+			return new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false, jdk.available());
 		}
 		int target = JdkTarget.of(projectDir).orElse(-1);
 		if (target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name)) {
-			return new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true);
+			return new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true, true);
 		}
-		return new LookupResult(false, Confidence.CANDIDATE, List.of(), suggestions(dbs, name), false);
+		return new LookupResult(false, Confidence.CANDIDATE, List.of(), suggestions(dbs, name), false,
+				jdk.available());
 	}
 
 	/**
@@ -101,14 +102,14 @@ public final class LookupService {
 				answers.put(symbol, miss());
 				continue;
 			}
-			List<Symbol> matches = store.findAcross(dbs, name);
+			List<Symbol> matches = CheckOrchestrator.findBoth(store, dbs, name);
 			if (!matches.isEmpty()) {
 				answers.put(symbol,
-						new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false));
+						new LookupResult(true, Confidence.DEFINITE, matches, List.of(), false, jdk.available()));
 				continue;
 			}
 			if (target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name)) {
-				answers.put(symbol, new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true));
+				answers.put(symbol, new LookupResult(true, Confidence.DEFINITE, List.of(), List.of(), true, true));
 				continue;
 			}
 			pending.put(symbol, name);
@@ -125,7 +126,7 @@ public final class LookupService {
 			for (String symbol : group.getValue()) {
 				String name = pending.get(symbol);
 				answers.put(symbol, new LookupResult(false, Confidence.CANDIDATE, List.of(),
-						Suggestions.rank(name, pool, 5), false));
+						Suggestions.rank(name, pool, 5), false, jdk.available()));
 			}
 		}
 		return answers;

@@ -1,0 +1,21 @@
+{
+  "resources": {
+    "includes": [
+      {
+        "pattern": "packs/.*\\.yaml"
+      },
+      {
+        "pattern": "META-INF/services/io.github.kxng0109.importtruth.model.LibraryIndexer"
+      },
+      {
+        "pattern": "META-INF/services/io.modelcontextprotocol.json.McpJsonMapperSupplier"
+      },
+      {
+        "pattern": "META-INF/services/io.modelcontextprotocol.json.schema.JsonSchemaValidatorSupplier"
+      },
+      {
+        "pattern": "META-INF/services/org.slf4j.spi.SLF4JServiceProvider"
+      }
+    ]
+  }
+}

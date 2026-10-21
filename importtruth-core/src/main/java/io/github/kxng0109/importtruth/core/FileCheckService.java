@@ -14,7 +14,9 @@ import io.github.kxng0109.importtruth.model.Symbol;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -31,6 +33,16 @@ public final class FileCheckService {
 	private final LibraryIndexer indexer;
 	private final DependencyResolver resolver;
 	private final JdkIndex jdk;
+
+	/**
+	 * Detail for an import the tool cannot prove missing, because the
+	 * JDK API could not be consulted. A native image has neither the
+	 * runtime image filesystem nor a {@code ct.sym}, so every JDK class
+	 * looks absent, and claiming such an import is missing would be a
+	 * false verdict.
+	 */
+	private static final String JDK_UNAVAILABLE =
+			"the JDK API index is unavailable in this build, so this import is unverified";
 
 	/**
 	 * Creates the service.
@@ -83,12 +95,54 @@ public final class FileCheckService {
 		Objects.requireNonNull(dbs, "dbs");
 		Objects.requireNonNull(own, "own");
 		requireInside(projectDir, file);
-		ImportScan scan = JavaImports.of(file);
+		return verdict(projectDir, file, dbs, own, JdkTarget.of(projectDir).orElse(-1), JavaImports.of(file));
+	}
+
+	/**
+	 * Checks many files against already-resolved indexes. The imports
+	 * of the whole batch are parsed by one compiler task, so a batch
+	 * pays the compiler setup once instead of once per file. Every file
+	 * gets the answer the single file path gives it.
+	 *
+	 * @param projectDir project root, never null
+	 * @param files      source files, never null
+	 * @param dbs        index files, never null
+	 * @param own        own-project packages, never null
+	 * @return the outcome per file, in request order, never null
+	 * @throws IOException when index reads fail
+	 */
+	public Map<Path, CheckResult> checkAll(
+			Path projectDir, List<Path> files, List<Path> dbs, Set<String> own)
+			throws IOException {
+		Objects.requireNonNull(projectDir, "projectDir");
+		Objects.requireNonNull(files, "files");
+		Objects.requireNonNull(dbs, "dbs");
+		Objects.requireNonNull(own, "own");
+		for (Path file : files) {
+			Objects.requireNonNull(file, "file");
+			requireInside(projectDir, file);
+		}
+		Map<Path, ImportScan> scans = JavaImports.ofAll(files);
+		int target = JdkTarget.of(projectDir).orElse(-1);
+		Map<Path, CheckResult> results = new LinkedHashMap<>();
+		for (Path file : files) {
+			results.put(file, verdict(projectDir, file, dbs, own, target, scans.get(file)));
+		}
+		return results;
+	}
+
+	private CheckResult verdict(
+			Path projectDir,
+			Path file,
+			List<Path> dbs,
+			Set<String> own,
+			int target,
+			ImportScan scan)
+			throws IOException {
 		if (!scan.healthy()) {
 			return new CheckResult(false, List.of(), List.of());
 		}
 		String display = DisplayNames.relativizeOrFileName(projectDir, file);
-		int target = JdkTarget.of(projectDir).orElse(-1);
 		List<Finding> findings = new ArrayList<>();
 		List<ImportVerdict> verdicts = new ArrayList<>();
 		for (ImportRef ref : scan.imports()) {
@@ -118,7 +172,7 @@ public final class FileCheckService {
 			}
 		} else {
 			boolean jdkHit = target >= 0 ? jdk.existsIn(ref.target(), target) : jdk.exists(ref.target());
-			if (!store.findAcross(dbs, ref.target()).isEmpty() || jdkHit) {
+			if (CheckOrchestrator.existsSource(store, dbs, ref.target()) || jdkHit) {
 				verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 				return Optional.empty();
 			}
@@ -126,6 +180,9 @@ public final class FileCheckService {
 		}
 		if (isOwnOrGenerated(own, ref.target())) {
 			return Optional.of(candidate(display, ref, "project-owned or generated, unverified"));
+		}
+		if (!jdk.available()) {
+			return Optional.of(candidate(display, ref, JDK_UNAVAILABLE));
 		}
 		return Optional.of(
 				new Finding(display, (int) ref.line(), FindingKind.MISSING,
@@ -140,7 +197,7 @@ public final class FileCheckService {
 			List<ImportVerdict> verdicts,
 			int target)
 			throws IOException {
-		if (packageExists(dbs, own, ref.target(), target)) {
+		if (CheckOrchestrator.typeOrPackageResolves(store, jdk, dbs, own, ref.target(), target)) {
 			verdicts.add(new ImportVerdict(ref.target(), ref.line(), true));
 			return Optional.empty();
 		}
@@ -148,24 +205,12 @@ public final class FileCheckService {
 		if (isOwnOrGenerated(own, ref.target())) {
 			return Optional.of(candidate(display, ref, "project-owned or generated, unverified"));
 		}
+		if (!jdk.available()) {
+			return Optional.of(candidate(display, ref, JDK_UNAVAILABLE));
+		}
 		return Optional.of(
 				new Finding(display, (int) ref.line(), FindingKind.MISSING,
 						"package " + ref.target() + " resolves nowhere", suggestion(dbs, ref.target())));
-	}
-
-	private boolean packageExists(List<Path> dbs, Set<String> own, String name, int target)
-			throws IOException {
-		for (String pkg : own) {
-			if (Packages.coveredBy(name, pkg)) {
-				return true;
-			}
-		}
-		for (Path db : dbs) {
-			if (!store.searchPrefix(db, name + ".", 1).isEmpty()) {
-				return true;
-			}
-		}
-		return target >= 0 ? jdk.packageExistsIn(name, target) : jdk.packageExists(name);
 	}
 
 	private static void requireInside(Path projectDir, Path file) throws IOException {

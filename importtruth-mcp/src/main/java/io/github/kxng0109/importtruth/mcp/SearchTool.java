@@ -6,6 +6,7 @@ import io.modelcontextprotocol.spec.McpSchema;
 
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -58,7 +59,11 @@ public final class SearchTool {
 	}
 
 	/**
-	 * Handles a search call.
+	 * Handles a search call. The rendered lines stay as they were; the
+	 * structured content carries the same hits with the descriptor of
+	 * every symbol, so two overloads of one name stay apart. The status
+	 * there says whether the query matched anything, not whether a named
+	 * symbol resolves.
 	 *
 	 * @param arguments tool arguments, never null
 	 * @return successful result with one line per match, or an error result
@@ -68,12 +73,14 @@ public final class SearchTool {
 		Optional<String> project = McpArgs.string(arguments, "projectPath");
 		Optional<String> query = McpArgs.string(arguments, "query");
 		if (project.isEmpty() || query.isEmpty()) {
-			return McpResults.err("projectPath and query are required strings");
+			String message = "projectPath and query are required strings";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		String projectPath = project.get();
 		String text = query.get();
 		int limit = limitOf(arguments.get("limit"));
 		List<String> lines = new ArrayList<>();
+		List<Map<String, Object>> matches = new ArrayList<>();
 		try {
 			for (Symbol match : search.search(Paths.get(projectPath), text, limit)) {
 				StringBuilder row = new StringBuilder("hit: ").append(match.fqn())
@@ -82,14 +89,20 @@ public final class SearchTool {
 					row.append(" deprecated");
 				}
 				lines.add(row.toString());
+				matches.add(McpResults.symbol(match));
 			}
 		} catch (Exception failure) {
-			return McpResults.err("search failed: " + failure);
+			String message = "search failed: " + failure;
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		if (lines.isEmpty()) {
 			lines.add("no matches for " + text);
 		}
-		return McpResults.ok(lines);
+		Map<String, Object> content = new LinkedHashMap<>();
+		content.put("status", matches.isEmpty() ? "NOT_FOUND" : "FOUND");
+		content.put("query", text);
+		content.put("matches", matches);
+		return McpResults.ok(lines, content);
 	}
 
 	static int limitOf(Object raw) {

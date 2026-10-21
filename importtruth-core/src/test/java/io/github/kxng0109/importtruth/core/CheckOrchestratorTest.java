@@ -18,6 +18,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -133,6 +134,88 @@ final class CheckOrchestratorTest {
 		assertThat(
 				CheckOrchestrator.packageResolves(store, jdk, List.of(missing), Set.of(), "com.example", -1))
 				.as("broken package query tolerated").isFalse();
+	}
+
+	@Test
+	@DisplayName("rekeys when the classpath moves")
+	void rekeysWhenClasspathMoves() throws Exception {
+		Path jar = files.resolve("one.jar");
+		Files.write(jar, "bytes".getBytes(StandardCharsets.UTF_8));
+		Path other = files.resolve("two.jar");
+		Files.write(other, "bytes".getBytes(StandardCharsets.UTF_8));
+		Path db = files.resolve("one.idx");
+		Path otherDb = files.resolve("two.idx");
+
+		String key = CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.example"), 21);
+		String moved = CheckOrchestrator.scopeKey(List.of(jar, other), List.of(db, otherDb),
+				Set.of("com.example"), 21);
+
+		assertThat(moved).as("a changed classpath changes the key").isNotEqualTo(key);
+	}
+
+	@Test
+	@DisplayName("keeps the scope key while the classpath holds")
+	void keepsScopeKeyWhileClasspathHolds() throws Exception {
+		Path jar = files.resolve("held.jar");
+		Files.write(jar, "bytes".getBytes(StandardCharsets.UTF_8));
+		Path db = files.resolve("held.idx");
+
+		String key = CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.example"), 21);
+		Files.setLastModifiedTime(jar, FileTime.fromMillis(System.currentTimeMillis() + 5000));
+
+		assertThat(CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.example"), 21))
+				.as("the key holds while the classpath holds")
+				.isEqualTo(key);
+	}
+
+	@Test
+	@DisplayName("keeps the scope key cache bounded")
+	void keepsScopeKeyCacheBounded() throws Exception {
+		Path jar = files.resolve("bounded.jar");
+		Files.write(jar, "bytes".getBytes(StandardCharsets.UTF_8));
+		Path db = files.resolve("bounded.idx");
+
+		for (int i = 0; i < 200; i++) {
+			Files.write(db, ("index" + i).getBytes(StandardCharsets.UTF_8));
+			CheckOrchestrator.scopeKey(List.of(jar), List.of(db), Set.of("com.example" + i), 21);
+		}
+
+		assertThat(CheckOrchestrator.cachedScopeKeys())
+				.as("scope key cache size")
+				.isLessThanOrEqualTo(CheckOrchestrator.MAX_SCOPE_KEYS);
+	}
+
+	@Test
+	@DisplayName("does not resolve a member as an import")
+	void doesNotResolveMember() throws Exception {
+		Path jar = files.resolve("member.jar");
+		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new ZipEntry("META-INF/"));
+			zip.closeEntry();
+		}
+		JarIndexStore store = new JarIndexStore(files.resolve("member-index"));
+		openStores.add(store);
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
+				new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
+						"com.example.Widget", false, "", false));
+		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, List.of(jar));
+
+		assertThat(CheckOrchestrator.typeOrPackageResolves(store, new JdkIndex(), dbs, Set.of(),
+				"com.example.Widget.build", -1))
+				.as("a member is not importable")
+				.isFalse();
+	}
+
+	@Test
+	@DisplayName("adds no policy hit when the policy holds none")
+	void addsNoPolicyHit() throws Exception {
+		CheckResult result = new CheckResult(true, List.of(),
+				List.of(new ImportVerdict("com.example.Old", 2, true)));
+
+		List<Finding> findings = CheckOrchestrator.applyPolicy(result, target -> Optional.empty(), "A.java");
+
+		assertThat(findings).as("no policy hit").isEmpty();
 	}
 
 	@Test

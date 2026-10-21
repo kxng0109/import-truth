@@ -8,7 +8,9 @@ import io.github.kxng0109.importtruth.core.JdkIndex;
 import io.github.kxng0109.importtruth.core.LookupService;
 import io.github.kxng0109.importtruth.core.SearchService;
 import io.github.kxng0109.importtruth.index.JarIndexStore;
+import io.github.kxng0109.importtruth.model.Confidence;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
+import io.github.kxng0109.importtruth.model.LookupResult;
 import io.github.kxng0109.importtruth.model.Symbol;
 import io.github.kxng0109.importtruth.model.SymbolKind;
 import io.modelcontextprotocol.spec.McpSchema.CallToolResult;
@@ -73,10 +75,98 @@ final class LookupSearchToolTest {
 		assertThat(found).as("found line").startsWith("FOUND DEFINITE com.example.Widget");
 
 		String missing = textOf(lookup.call(Map.of("projectPath", project.toString(), "symbol", "org.example.Widget")));
-		assertThat(missing).as("missing line").startsWith("NOT_FOUND CANDIDATE org.example.Widget");
+		assertThat(missing).as("missing line").startsWith("NOT_FOUND org.example.Widget");
+		assertThat(missing).as("no confidence token on a miss").doesNotContain("CANDIDATE");
 
 		String hits = textOf(search.call(Map.of("projectPath", project.toString(), "query", "Widget", "limit", 1)));
 		assertThat(hits).as("exactly one capped hit").isEqualTo("hit: com.example.Widget (CLASS)");
+	}
+
+	@Test
+	@DisplayName("marks a miss unverified when the JDK API could not be consulted")
+	void marksUnverifiedMiss() throws Exception {
+		LookupTool lookup = new LookupTool(services().lookup());
+		LookupResult unverified = new LookupResult(
+				false, Confidence.CANDIDATE, List.of(), List.of("com.example.Widget"), false, false);
+
+		List<String> lines = lookup.lines("org.example.Widget", unverified);
+
+		assertThat(lines).as("unverified, not a verdict").containsExactly(
+				"UNVERIFIED org.example.Widget",
+				"not in the dependency classpath; the JDK API index is unavailable in this build",
+				"maybe: com.example.Widget");
+		Map<String, Object> content = lookup.structured("org.example.Widget", unverified);
+		assertThat(content).as("unverified status").containsEntry("status", "UNVERIFIED");
+		assertThat(content).as("jdk not consulted").containsEntry("jdkChecked", false);
+		assertThat(content).as("says why").containsKey("message");
+	}
+
+	@Test
+	@DisplayName("carries the verdict in structured content")
+	void carriesStructuredContent() throws Exception {
+		Services services = services();
+		LookupTool lookup = new LookupTool(services.lookup());
+
+		CallToolResult found = lookup.call(Map.of("projectPath", project.toString(), "symbol", "com.example.Widget"));
+		Map<String, Object> hit = structuredOf(found);
+		assertThat(hit).as("found status").containsEntry("status", "FOUND");
+		assertThat(hit).as("found confidence").containsEntry("confidence", "DEFINITE");
+		assertThat(hit).as("found name").containsEntry("name", "com.example.Widget");
+		assertThat(hit).as("no artifact for an indexed hit").doesNotContainKey("library");
+		assertThat(listOf(hit, "matches")).as("one match").hasSize(1);
+		assertThat(listOf(hit, "matches").get(0)).as("match kind").containsEntry("kind", "CLASS");
+		assertThat(textOf(found)).as("rendered line kept").contains("FOUND DEFINITE com.example.Widget");
+
+		CallToolResult jdk = lookup.call(Map.of("projectPath", project.toString(), "symbol", "java.util.List"));
+		assertThat(structuredOf(jdk)).as("jdk artifact").containsEntry("library", "jdk");
+
+		CallToolResult missing = lookup.call(Map.of("projectPath", project.toString(), "symbol", "org.example.Widget"));
+		Map<String, Object> miss = structuredOf(missing);
+		assertThat(miss).as("miss status").containsEntry("status", "NOT_FOUND");
+		assertThat(miss).as("miss confidence").containsEntry("confidence", "CANDIDATE");
+		assertThat(miss).as("miss name").containsEntry("name", "org.example.Widget");
+		assertThat(miss).as("suggestions carried").containsKey("suggestions");
+		assertThat(textOf(missing)).as("rendered line kept").contains("NOT_FOUND org.example.Widget");
+	}
+
+	@Test
+	@DisplayName("tells overloads apart by descriptor")
+	void tellsOverloadsApart() throws Exception {
+		Services services = overloadedServices();
+		LookupTool lookup = new LookupTool(services.lookup());
+		SearchTool search = new SearchTool(services.search());
+
+		CallToolResult found = lookup.call(Map.of("projectPath", project.toString(), "symbol", "com.example.Over.load"));
+		List<Map<String, Object>> matches = listOf(structuredOf(found), "matches");
+		assertThat(matches).as("both overloads").hasSize(2);
+		assertThat(matches.get(0)).as("first descriptor").containsEntry("descriptor", "()V");
+		assertThat(matches.get(1)).as("second descriptor").containsEntry("descriptor", "(I)V");
+		assertThat(textOf(found)).as("rendered line kept").contains("FOUND DEFINITE com.example.Over.load");
+
+		CallToolResult hits = search.call(Map.of("projectPath", project.toString(), "query", "Over.load"));
+		Map<String, Object> structured = structuredOf(hits);
+		assertThat(structured).as("search status").containsEntry("status", "FOUND");
+		assertThat(structured).as("query echoed").containsEntry("query", "Over.load");
+		List<Map<String, Object>> found2 = listOf(structured, "matches");
+		assertThat(found2).as("both overloads").hasSize(2);
+		assertThat(found2.get(0)).as("first descriptor").containsEntry("descriptor", "()V");
+		assertThat(found2.get(1)).as("second descriptor").containsEntry("descriptor", "(I)V");
+		assertThat(textOf(hits)).as("hit line kept").contains("hit: com.example.Over.load (METHOD)");
+	}
+
+	@Test
+	@DisplayName("marks a failed call as an error in structured content")
+	void marksFailedCalls() throws Exception {
+		Services services = services();
+		LookupTool lookup = new LookupTool(services.lookup());
+		SearchTool search = new SearchTool(services.search());
+
+		Map<String, Object> badLookup = structuredOf(lookup.call(Map.of("projectPath", project.toString())));
+		assertThat(badLookup).as("lookup error status").containsEntry("status", "ERROR");
+		assertThat(badLookup).as("lookup error message").containsKey("message");
+		Map<String, Object> badSearch = structuredOf(search.call(Map.of("projectPath", project.toString())));
+		assertThat(badSearch).as("search error status").containsEntry("status", "ERROR");
+		assertThat(badSearch).as("search error message").containsKey("message");
 	}
 
 	@Test
@@ -201,6 +291,31 @@ final class LookupSearchToolTest {
 				new SearchService(store, indexer, resolver));
 	}
 
+	private Services overloadedServices() throws Exception {
+		Path first = project.resolve("first.jar");
+		Path second = project.resolve("second.jar");
+		writeJar(first, "first");
+		writeJar(second, "second");
+		JarIndexStore store = openStore(state.resolve("overload-index"));
+		LibraryIndexer indexer = jarFile -> List.of(new Symbol("com.example.Over.load", SymbolKind.METHOD,
+				jarFile.equals(first) ? "()V" : "(I)V", "com.example.Over", false, "", false));
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(first, second);
+		JdkIndex jdk = new JdkIndex();
+		return new Services(
+				new LookupService(store, indexer, resolver, jdk),
+				new SearchService(store, indexer, resolver));
+	}
+
+	private void writeJar(Path jar, String marker) throws Exception {
+		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new ZipEntry("META-INF/"));
+			zip.closeEntry();
+			zip.putNextEntry(new ZipEntry("marker.txt"));
+			zip.write(marker.getBytes(StandardCharsets.UTF_8));
+			zip.closeEntry();
+		}
+	}
+
 	private LookupService failingLookup() throws Exception {
 		JarIndexStore store = openStore(state.resolve("failing-index"));
 		LibraryIndexer indexer = jarFile -> List.of();
@@ -222,6 +337,19 @@ final class LookupSearchToolTest {
 	private static String textOf(CallToolResult result) {
 		assertThat(result.isError()).as("no tool error").isFalse();
 		return ((TextContent) result.content().get(0)).text();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> structuredOf(CallToolResult result) {
+		assertThat(result.structuredContent()).as("structured content present").isInstanceOf(Map.class);
+		return (Map<String, Object>) result.structuredContent();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static List<Map<String, Object>> listOf(Map<String, Object> structured, String key) {
+		Object value = structured.get(key);
+		assertThat(value).as("list under " + key).isInstanceOf(List.class);
+		return (List<Map<String, Object>>) value;
 	}
 
 	private record Services(LookupService lookup, SearchService search) {

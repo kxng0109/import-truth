@@ -11,3 +11,11 @@ Thumbs.db
 .idea/
 *.iml
 .vscode/
+
+# Session state is local only. It is a handover scratch file, never a
+# deliverable, and it must never be committed or pushed.
+SESSION-STATE.md
+
+# Working documents are local only. They describe how the work is done,
+# not what the project is.
+AGENTS.md

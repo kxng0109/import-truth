@@ -14,6 +14,16 @@
   <name>importtruth-cli</name>
   <description>Composition root. Owns Main. Builds the shaded JAR.</description>
 
+  <properties>
+    <!--
+      GraalVM native-image build tooling. The version was read from Maven
+      Central on 2026-10-20: the metadata reports latest and release both
+      1.1.16. The plugin is declared inside a profile, so the default
+      build never resolves it and never needs it on the network.
+    -->
+    <native.maven.plugin.version>1.1.16</native.maven.plugin.version>
+  </properties>
+
   <dependencies>
     <dependency>
       <groupId>io.github.kxng0109</groupId>
@@ -100,4 +110,57 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!--
+      Native executable build. Active only with -Pnative, so the default
+      build stays exactly as it is: the shaded JAR remains the artifact
+      and the GraalVM plugin is never resolved.
+
+      The shaded JAR is the image input. The plugin's default classpath
+      would be the artifact plus every runtime dependency, and the shaded
+      JAR already contains them.
+
+      The image flags live in
+      src/main/resources/META-INF/native-image/io.github.kxng0109/importtruth/native-image.properties
+      so that a direct native-image call and this profile build the same
+      image. They are repeated here with identical values; GraalVM keeps
+      the last value it sees for a repeated option, so the repetition is
+      harmless.
+    -->
+    <profile>
+      <id>native</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.graalvm.buildtools</groupId>
+            <artifactId>native-maven-plugin</artifactId>
+            <version>${native.maven.plugin.version}</version>
+            <executions>
+              <execution>
+                <id>build-native</id>
+                <goals>
+                  <goal>compile-no-fork</goal>
+                </goals>
+                <phase>package</phase>
+              </execution>
+            </executions>
+            <configuration>
+              <mainClass>io.github.kxng0109.importtruth.cli.Main</mainClass>
+              <imageName>importtruth</imageName>
+              <classpath>
+                <param>${project.build.directory}/${project.build.finalName}.jar</param>
+              </classpath>
+              <useArgFile>false</useArgFile>
+              <buildArgs>
+                <buildArg>-O2</buildArg>
+                <buildArg>--no-fallback</buildArg>
+                <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+              </buildArgs>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

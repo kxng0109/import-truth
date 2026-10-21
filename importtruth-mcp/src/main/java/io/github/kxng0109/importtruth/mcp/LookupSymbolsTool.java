@@ -6,6 +6,7 @@ import io.modelcontextprotocol.spec.McpSchema;
 
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -66,7 +67,8 @@ public final class LookupSymbolsTool {
 	 * Handles a batch lookup call. Resolver failures stay per symbol as
 	 * {@code ERROR} lines in a success result, while oversize, blank, or
 	 * invalid batches fail the whole call. Success lines match the
-	 * single-symbol tool exactly.
+	 * single-symbol tool exactly, and the structured content holds one
+	 * answer per requested symbol, in request order.
 	 *
 	 * @param arguments tool arguments, never null
 	 * @return successful result with one block per symbol, or an error result
@@ -76,20 +78,23 @@ public final class LookupSymbolsTool {
 		Optional<String> project = McpArgs.string(arguments, "projectPath");
 		Optional<List<?>> raw = McpArgs.strings(arguments, "symbols");
 		if (project.isEmpty()) {
-			return McpResults.err("projectPath is a required string");
+			String message = "projectPath is a required string";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		if (raw.isEmpty()) {
-			return McpResults.err("symbols is a required non-empty array");
+			String message = "symbols is a required non-empty array";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		List<?> symbols = raw.get();
 		if (symbols.size() > MAX_SYMBOLS) {
-			return McpResults.err("at most " + MAX_SYMBOLS + " symbols per call");
+			String message = "at most " + MAX_SYMBOLS + " symbols per call";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		String projectPath = project.get();
 		List<String> valid = new ArrayList<>();
 		for (Object item : symbols) {
-			if (item instanceof String name && !name.isBlank()) {
-				valid.add(name);
+			if (McpArgs.usableItem(item)) {
+				valid.add((String) item);
 			}
 		}
 		Map<String, LookupResult> answers;
@@ -97,23 +102,44 @@ public final class LookupSymbolsTool {
 			answers = service.lookupBatch(Paths.get(projectPath), valid);
 		} catch (Exception failure) {
 			List<String> errors = new ArrayList<>();
+			List<Map<String, Object>> failed = new ArrayList<>();
 			for (Object item : symbols) {
-				if (!(item instanceof String name) || name.isBlank()) {
-					errors.add("ERROR symbol must be a non-blank string");
+				if (!McpArgs.usableItem(item)) {
+					errors.add("ERROR symbol must be a non-blank single-line string");
+					failed.add(McpResults.failure("symbol must be a non-blank single-line string"));
 				} else {
-					errors.add("ERROR " + name + ": lookup failed: " + failure);
+					errors.add("ERROR " + item + ": lookup failed: " + failure);
+					failed.add(McpResults.failure((String) item, "lookup failed: " + failure));
 				}
 			}
-			return McpResults.ok(errors);
+			return McpResults.ok(errors, results(failed));
 		}
 		List<String> lines = new ArrayList<>();
+		List<Map<String, Object>> answersPerSymbol = new ArrayList<>();
 		for (Object item : symbols) {
-			if (!(item instanceof String name) || name.isBlank()) {
-				lines.add("ERROR symbol must be a non-blank string");
+			if (!McpArgs.usableItem(item)) {
+				lines.add("ERROR symbol must be a non-blank single-line string");
+				answersPerSymbol.add(McpResults.failure("symbol must be a non-blank single-line string"));
 				continue;
 			}
+			String name = (String) item;
 			lines.addAll(lookup.lines(name, answers.get(name)));
+			answersPerSymbol.add(lookup.structured(name, answers.get(name)));
 		}
-		return McpResults.ok(lines);
+		return McpResults.ok(lines, results(answersPerSymbol));
+	}
+
+	/**
+	 * Wraps the per symbol answers in the structured content of a
+	 * batch. The list keeps the request order, so an answer lines up
+	 * with the symbol that was asked about.
+	 *
+	 * @param answers one answer per requested symbol, never null
+	 * @return structured content, never null
+	 */
+	private static Map<String, Object> results(List<Map<String, Object>> answers) {
+		Map<String, Object> content = new LinkedHashMap<>();
+		content.put("results", answers);
+		return content;
 	}
 }

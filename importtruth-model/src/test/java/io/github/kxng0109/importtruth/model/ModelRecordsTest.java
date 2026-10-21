@@ -60,6 +60,16 @@ final class ModelRecordsTest {
 	}
 
 	@Test
+	@DisplayName("carries whether the JDK API could be consulted")
+	void carriesJdkChecked() {
+		LookupResult checked = new LookupResult(false, Confidence.CANDIDATE, List.of(), List.of(), false);
+		LookupResult unchecked = new LookupResult(false, Confidence.CANDIDATE, List.of(), List.of(), false, false);
+
+		assertThat(checked.jdkChecked()).as("checked by default").isTrue();
+		assertThat(unchecked.jdkChecked()).as("not consulted").isFalse();
+	}
+
+	@Test
 	@DisplayName("rejects null lookup parts")
 	@SuppressWarnings("DataFlowIssue")
 	void rejectsNullLookup() {

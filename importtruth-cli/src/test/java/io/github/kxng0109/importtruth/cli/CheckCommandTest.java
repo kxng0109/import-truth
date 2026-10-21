@@ -228,7 +228,7 @@ final class CheckCommandTest {
 		closeStores();
 
 		try (var indexes = Files.list(state.resolve("fake-index"))) {
-			for (Path db : indexes.filter(p -> p.toString().endsWith(".mv.db")).toList()) {
+			for (Path db : indexes.filter(p -> p.toString().endsWith(".idx")).toList()) {
 				Files.write(db, "corrupt".getBytes(StandardCharsets.UTF_8));
 			}
 		}

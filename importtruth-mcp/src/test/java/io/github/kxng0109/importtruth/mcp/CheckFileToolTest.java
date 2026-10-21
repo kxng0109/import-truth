@@ -200,7 +200,7 @@ final class CheckFileToolTest {
 
 		closeStores();
 		try (var indexes = Files.list(state.resolve("index"))) {
-			for (Path db : indexes.filter(p -> p.toString().endsWith(".mv.db")).toList()) {
+			for (Path db : indexes.filter(p -> p.toString().endsWith(".idx")).toList()) {
 				Files.write(db, "corrupt".getBytes(StandardCharsets.UTF_8));
 			}
 		}
@@ -225,6 +225,129 @@ final class CheckFileToolTest {
 		assertThat(((TextContent) result.content().get(0)).text())
 				.as("names the violation")
 				.contains("outside the project");
+	}
+
+	@Test
+	@DisplayName("carries the verdict of a clean file")
+	void carriesCleanVerdict() throws Exception {
+		CheckFileTool tool = tool();
+		Path clean = file("Clean.java",
+				"package com.other; import java.util.List; public class Clean { List<String> items; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", clean.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(textOf(result)).as("rendered text").isEqualTo("clean");
+		assertThat(structured).as("status").containsEntry("status", "CLEAN");
+		assertThat(structured).as("file").containsEntry("file", clean.toString());
+		assertThat(structured).as("finding count").containsEntry("findingCount", 0);
+		assertThat(structured.get("findings")).as("no findings").isEqualTo(List.of());
+	}
+
+	@Test
+	@DisplayName("carries every finding of a file")
+	void carriesFindings() throws Exception {
+		CheckFileTool tool = tool();
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", missing.toString()));
+		Map<String, Object> structured = structuredOf(result);
+		List<Map<String, Object>> findings = listOf(structured, "findings");
+
+		assertThat(textOf(result)).as("rendered text").contains("MISSING").contains("org.example.Nope");
+		assertThat(structured).as("status").containsEntry("status", "FINDINGS");
+		assertThat(structured).as("finding count").containsEntry("findingCount", 1);
+		assertThat(findings).as("one finding").hasSize(1);
+		assertThat(findings.get(0)).as("kind").containsEntry("kind", "MISSING");
+		assertThat(findings.get(0)).as("a missing import does not resolve").containsEntry("resolved", false);
+		assertThat(findings.get(0)).as("line").containsEntry("line", 2);
+		assertThat(findings.get(0)).as("text")
+				.containsEntry("text", "import org.example.Nope resolves nowhere");
+		assertThat(findings.get(0)).as("no suggestion without candidates").doesNotContainKey("suggestion");
+	}
+
+	@Test
+	@DisplayName("marks a policy finding as resolved")
+	void marksPolicyFindingResolved() throws Exception {
+		CheckFileTool tool = tool();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()));
+		List<Map<String, Object>> findings = listOf(structuredOf(result), "findings");
+
+		assertThat(findings).as("one finding").hasSize(1);
+		assertThat(findings.get(0)).as("kind").containsEntry("kind", "POLICY");
+		assertThat(findings.get(0)).as("a policy hit is a resolved import").containsEntry("resolved", true);
+		assertThat(findings.get(0)).as("line").containsEntry("line", 1);
+		assertThat((String) findings.get(0).get("text")).as("detail").contains("tools.jackson.databind");
+		assertThat((String) findings.get(0).get("suggestion")).as("suggestion")
+				.contains("tools.jackson.databind.ObjectMapper");
+		assertThat(textOf(result)).as("rendered text carries the same detail")
+				.contains((String) findings.get(0).get("text"));
+	}
+
+	@Test
+	@DisplayName("leaves an unverified finding without a verdict")
+	void leavesUnverifiedFindingOpen() throws Exception {
+		CheckFileTool tool = tool();
+		Path own = file("Own.java", "package com.other;\nimport com.other.Own;\npublic class Own { }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", own.toString()));
+		List<Map<String, Object>> findings = listOf(structuredOf(result), "findings");
+
+		assertThat(findings).as("one finding").hasSize(1);
+		assertThat(findings.get(0)).as("kind").containsEntry("kind", "CANDIDATE");
+		assertThat(findings.get(0)).as("an unverified import has no verdict").doesNotContainKey("resolved");
+		assertThat((String) findings.get(0).get("text")).as("detail")
+				.isEqualTo("import com.other.Own project-owned or generated, unverified");
+	}
+
+	@Test
+	@DisplayName("marks a failed call as an error")
+	void marksFailedCall() throws Exception {
+		CheckFileTool failing = failingTool();
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+
+		CallToolResult result = failing.call(Map.of("projectPath", project.toString(), "filePath", missing.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(result.isError()).as("error flag").isTrue();
+		assertThat(structured).as("status").containsEntry("status", "ERROR");
+		assertThat((String) structured.get("message")).as("message").contains("check failed");
+		assertThat(structured).as("a failure carries no verdict").doesNotContainKey("findings");
+	}
+
+	@Test
+	@DisplayName("marks a rejected call as an error")
+	void marksRejectedCall() {
+		CheckFileTool tool = tool();
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(result.isError()).as("error flag").isTrue();
+		assertThat(structured).as("status").containsEntry("status", "ERROR");
+		assertThat((String) structured.get("message")).as("message").contains("required strings");
+	}
+
+	@Test
+	@DisplayName("marks an unreadable file as an error")
+	void marksUnreadableFile() throws Exception {
+		CheckFileTool tool = tool();
+		Path broken = file("Broken.java",
+				"package com.other; import java.util.List; public class Broken { void x( { } }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", broken.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(textOf(result)).as("rendered text").startsWith("ERROR ").contains("Broken.java");
+		assertThat(structured).as("status").containsEntry("status", "ERROR");
+		assertThat(structured).as("file").containsEntry("file", broken.toString());
+		assertThat((String) structured.get("message")).as("message").contains("could not be parsed");
 	}
 
 	private CheckFileTool tool() {
@@ -272,5 +395,18 @@ final class CheckFileToolTest {
 	private static String textOf(CallToolResult result) {
 		assertThat(result.isError()).as("no tool error").isFalse();
 		return ((TextContent) result.content().get(0)).text();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> structuredOf(CallToolResult result) {
+		assertThat(result.structuredContent()).as("structured content present").isInstanceOf(Map.class);
+		return (Map<String, Object>) result.structuredContent();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static List<Map<String, Object>> listOf(Map<String, Object> structured, String key) {
+		Object value = structured.get(key);
+		assertThat(value).as("list under " + key).isInstanceOf(List.class);
+		return (List<Map<String, Object>>) value;
 	}
 }

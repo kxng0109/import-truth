@@ -18,6 +18,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarOutputStream;
 import java.util.zip.ZipEntry;
 
@@ -195,6 +197,32 @@ final class FileCheckServiceTest {
 	}
 
 	@Test
+	@DisplayName("resolves a wildcard import of a type with no public members")
+	void resolvesMemberlessTypeWildcard() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/other/Memberless.java",
+				"package com.other; import com.example.Empty.*; public class Memberless { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.healthy()).as("healthy file").isTrue();
+		assertThat(result.findings()).as("wildcard resolved").isEmpty();
+	}
+
+	@Test
+	@DisplayName("rejects a class file spelling in an import")
+	void rejectsBinarySpellingInImport() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/other/Binary.java",
+				"package com.other; import com.example.Outer$Inner; public class Binary { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.findings()).as("binary spelling rejected").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("missing kind").isEqualTo(FindingKind.MISSING);
+	}
+
+	@Test
 	@DisplayName("treats bare own-package names as candidates")
 	void treatsBareOwnNamesAsCandidates() throws Exception {
 		FileCheckService check = service();
@@ -222,8 +250,29 @@ final class FileCheckServiceTest {
 		assertThat(result.healthy()).as("healthy file").isTrue();
 		assertThat(result.findings()).as("one finding").hasSize(1);
 		assertThat(result.findings().get(0).kind()).as("missing kind").isEqualTo(FindingKind.MISSING);
-		assertThat(result.findings().get(0).suggestion()).as("three suggestions")
-				.isEqualTo("maybe: com.example.Widget, com.example.Widget.help, com.example.Widget.build");
+		assertThat(result.findings().get(0).suggestion()).as("type suggestions only")
+				.isEqualTo("maybe: com.example.Widget");
+	}
+
+	@Test
+	@DisplayName("a package that no longer exists resolves nothing")
+	void deletedPackageResolvesNothing() throws Exception {
+		FileCheckService check = service();
+		Path widget = source("com/acme/Widget.java",
+				"package com.acme; public class Widget { }");
+		Path file = source("com/other/Wild.java",
+				"package com.other; import com.acme.*; public class Wild { }");
+
+		assertThat(check.check(project, file).findings())
+				.as("wildcard resolved while the package exists")
+				.isEmpty();
+
+		Files.delete(widget);
+
+		CheckResult after = check.check(project, file);
+		assertThat(after.findings()).as("wildcard no longer resolves").hasSize(1);
+		assertThat(after.verdicts()).as("one verdict").hasSize(1);
+		assertThat(after.verdicts().get(0).resolved()).as("the import does not resolve").isFalse();
 	}
 
 	@Test
@@ -244,7 +293,79 @@ final class FileCheckServiceTest {
 		}
 	}
 
+	@Test
+	@DisplayName("checks a batch with the answers of the single file path")
+	void checksBatchLikeSingleFiles() throws Exception {
+		FileCheckService check = service();
+		Path clean = source("com/example/BatchClean.java",
+				"package com.example; import java.util.List; public class BatchClean { List<String> a; }");
+		Path missing = source("com/other/BatchMissing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class BatchMissing { Nope n; }");
+		Path broken = source("com/other/BatchBroken.java",
+				"package com.other; import java.util.List; public class BatchBroken { void x( { } }");
+		Path file = source("com/other/BatchOther.java",
+				"package com.other; import java.util.Map; public class BatchOther { Map<String,String> m; }");
+		List<Path> files = List.of(clean, missing, broken, file);
+
+		Map<Path, CheckResult> answers = check.checkAll(project, files, List.of(), Set.of());
+
+		for (Path each : files) {
+			CheckResult batch = answers.get(each);
+			CheckResult single = check.checkWith(project, each, List.of(), Set.of());
+			assertThat(batch.healthy()).as("health of " + each.getFileName())
+					.isEqualTo(single.healthy());
+			assertThat(batch.findings()).as("findings of " + each.getFileName())
+					.isEqualTo(single.findings());
+			assertThat(batch.verdicts()).as("verdicts of " + each.getFileName())
+					.isEqualTo(single.verdicts());
+		}
+		assertThat(answers.get(missing).findings()).as("missing import flagged").hasSize(1);
+		assertThat(answers.get(broken).findings()).as("broken file silent").isEmpty();
+	}
+
+	@Test
+	@DisplayName("rejects a batch that leaves the project")
+	void rejectsBatchOutsideProject() throws Exception {
+		FileCheckService check = service();
+		Path outside = Files.createTempFile("Elsewhere", ".java");
+		try {
+			Files.write(outside,
+					"import org.example.Nope; public class Elsewhere { Nope n; }".getBytes(StandardCharsets.UTF_8));
+
+			assertThatThrownBy(() -> check.checkAll(project, List.of(outside), List.of(), Set.of()))
+					.as("outside file rejected")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("outside the project");
+		} finally {
+			Files.deleteIfExists(outside);
+		}
+	}
+
+	@Test
+	@DisplayName("leaves a JDK import unverified when the JDK API cannot be consulted")
+	void leavesJdkImportUnverified() throws Exception {
+		FileCheckService check = serviceWithoutJdk();
+		Path file = source("com/example/Use.java",
+				"package com.example; import java.util.List; public class Use { List<String> items; }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.findings()).as("one finding").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("unverified, not missing")
+				.isEqualTo(FindingKind.CANDIDATE);
+		assertThat(result.findings().get(0).detail()).as("says why")
+				.contains("JDK API index is unavailable");
+	}
+
 	private FileCheckService service() throws IOException {
+		return serviceWith(new JdkIndex());
+	}
+
+	private FileCheckService serviceWithoutJdk() throws IOException {
+		return serviceWith(new JdkIndex(null, null, List.of()));
+	}
+
+	private FileCheckService serviceWith(JdkIndex jdk) throws IOException {
 		Path jar = project.resolve("dep.jar");
 		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
 			zip.putNextEntry(new ZipEntry("META-INF/"));
@@ -258,7 +379,7 @@ final class FileCheckServiceTest {
 				return List.of(jar);
 			}
 		};
-		return new FileCheckService(store, indexer, resolver, new JdkIndex());
+		return new FileCheckService(store, indexer, resolver, jdk);
 	}
 
 	private Path source(String relative, String content) throws IOException {
@@ -275,6 +396,8 @@ final class FileCheckServiceTest {
 		public List<Symbol> index(Path jar) {
 			return List.of(
 					new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
+					new Symbol("com.example.Outer.Inner", SymbolKind.CLASS, null, null, false, "", false),
+					new Symbol("com.example.Empty", SymbolKind.CLASS, null, null, false, "", false),
 					new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
 							"com.example.Widget", false, "", false),
 					new Symbol("com.example.Widget.help", SymbolKind.METHOD, "()V",

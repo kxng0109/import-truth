@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -96,9 +97,12 @@ public final class CheckCommand {
 		Set<String> own = ProjectPackages.of(projectDir);
 		PolicyEngine policy = loadPack(projectDir, err, jars, dbs, own);
 		int exit = 0;
+		// One batch parse for every file: the per file path would build
+		// a compiler and a file manager per file.
+		Map<Path, CheckResult> results = check.checkAll(projectDir, files, dbs, own);
 		for (Path file : files) {
-			CheckResult result = check.checkWith(projectDir, file, dbs, own);
-			if (!result.healthy()) {
+			CheckResult result = results.get(file);
+			if (result == null || !result.healthy()) {
 				continue;
 			}
 			List<Finding> findings = CheckOrchestrator.applyPolicy(
