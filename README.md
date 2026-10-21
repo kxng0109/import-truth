@@ -71,10 +71,9 @@ code either. It only reads the shape of it.
   answer after the index file has been deleted. The whole index of a
   project costs about 11 MB of disk for 38 libraries.
 - **Honest answers.** The tool never claims a class is missing when it
-  could not look. A build with no JDK API index (a native image has
-  neither the runtime image filesystem nor `ct.sym`) answers
-  `UNVERIFIED` instead of `NOT_FOUND`, and an import it could not
-  disprove is a candidate, not a missing import.
+  could not look. A build that cannot consult the JDK API for the
+  release in question answers `UNVERIFIED` instead of `NOT_FOUND`, and
+  an import it could not disprove is a candidate, not a missing import.
 - **A machine channel.** Every tool answers twice: short lines for the
   agent to read, and the same answer as structured content for a
   program to read, with the status, the confidence, the overload
@@ -82,6 +81,24 @@ code either. It only reads the shape of it.
 - **One compiler for a batch.** A check of many files parses them all
   with one compiler task and one file manager, so the cost of the
   compiler is paid once per batch and not once per file.
+- **A bundled table of the JDK's API.** The tool ships a generated table
+  of what each JDK release documents, so it answers "does `java.util.List`
+  exist in release 21" without a JDK on disk at all. One file of about
+  318 KB covers the releases that the build JDK's own `ct.sym` documents,
+  which is 8 to 26 on Temurin 26. A release the table does not cover
+  falls back to the archive on disk, and a release nothing covers stays
+  `UNVERIFIED`.
+- **Resolved paths.** A path that looks like it is inside your project can
+  be a link that points anywhere. The tool resolves the project root and
+  the file before it compares them, so a junction cannot carry a read
+  outside the project, and it reads the resolved path, so the file it
+  checked is the file it read.
+- **Reachability.** A class file records only symbolic references, so the
+  tool can say which of your dependency JARs your compiled code actually
+  names, and which are named only by another dependency. It cannot see
+  reflection, `ServiceLoader`, a computed `Class.forName`, or resources,
+  so a JAR with no references is a candidate to remove, never a verdict,
+  and every such answer carries the caveat that says so.
 
 ## Boxes (modules)
 
@@ -120,22 +137,29 @@ Measured on this machine (Windows, 16 cores, Java 26): a warm check of one
 file answers in 35 ms, and a check of the 93 files of this project takes
 1.6 s, because a batch pays the compiler once instead of once per file.
 The first call of a session costs about 1.2 s, spent on the cached
-classpath, the target release index and the first sweep of the dependency
+classpath, the bundled JDK table and the first sweep of the dependency
 indexes. Resolution, indexes, parsed files and validated policy engines
 are memoized per session, and the classpath cache is reused across
-sessions until a pom changes. The target release index is cached on disk
-too, so a session that starts fresh pays 38 ms for it instead of 137 ms.
+sessions until a pom changes. The JDK's own release index is cached on
+disk too, so a session that starts fresh pays 38 ms for the releases the
+bundled table does not cover instead of 137 ms.
 Idle memory is about 67 MB with the launch flags below, and a full check
 of 93 files peaks at 99 MB, against 187 MB without the flags.
 Idle CPU is 0.02 percent of sixteen cores. Eight concurrent requests are
-all answered in 637 ms, because resolution, the target release index and
+all answered in 637 ms, because resolution, the JDK API table and the
 the dependency indexes are each loaded once no matter how many requests
 arrive, and because the index is searched in memory rather than read from
-disk. JDK answers come from the project's target release (read from the
-running JDK's `ct.sym`), never the running JVM alone, so projects that
-target other releases get honest verdicts. Misses get ranked suggestions:
-exact names first, then names from the same package, then small typos,
-and only ever types.
+disk. JDK answers come from the project's target release, never the running
+JVM alone, so projects that target other releases get honest verdicts. The
+release is answered from the bundled table, and from the running JDK's
+`ct.sym` for the releases the table does not cover. Misses get ranked
+suggestions: exact names first, then names from the same package, then
+small typos, and only ever types.
+
+A slow test enforces the budget, so a regression fails the build instead
+of being noticed months later: the 93 file check under 8 s, the index
+under 200 bytes per symbol, the server's working set under 160 MiB idle
+and 224 MiB under a burst of eight concurrent requests.
 
 On a machine that has never built the project, the dependencies are not in
 the local Maven repository yet, and the tool will not fetch them for you.
@@ -186,16 +210,32 @@ builds with GraalVM 25 or later and the MSVC C++ toolchain:
 mvnw.cmd -Pnative package
 ```
 
-The image is 43.6 MB and starts with no JVM at all. It is a second
-artifact, not the default: the shaded JAR stays what the plugin and the
-MCP configuration use. A native image carries no JDK on disk, so it
-cannot enumerate the JDK's API, and the tool says that instead of
-guessing.
+The image is 44.3 MB and starts with no JVM at all: it answers its first
+request 93 ms after it is started, and holds 45.5 MB of resident memory
+while it works, under 60 MB. The image's heap is capped at build time,
+because `native-image` sizes it ergonomically by default and the image's
+collector does not hand memory back eagerly, so an uncapped image keeps
+the footprint at its high-water mark, 76 MB here. The cap is the
+`native.heap.max.bytes` property, so a project with a much larger index
+can be given a bigger one. The image is a second artifact, not the
+default: the shaded JAR stays what the plugin and the MCP configuration
+use. A native image carries no JDK on disk, so it can read neither
+`ct.sym` nor the runtime image filesystem. The native build carries the
+bundled JDK API table, so an image answers the releases the table covers
+and says `UNVERIFIED` for the ones it does not.
 
 Direct check of files (exit 1 on missing imports, silent when clean):
 
 ```text
 java -jar importtruth-cli/target/importtruth-cli-0.4.0.jar check <project> <file>...
+```
+
+Which dependency JARs your code actually references (exit 0 on success,
+exit 1 on failure). The project must have compiled classes, in
+`target/classes` or `target/test-classes`:
+
+```text
+java -jar importtruth-cli/target/importtruth-cli-0.4.0.jar deps <project>
 ```
 
 A sample hook config lives in `.pre-commit-config.yaml`. The MCP server
@@ -205,6 +245,10 @@ under `mcp.servers` for checks driven by the model, plus batch variants
 sweep phases where round trips dominate. `suggest_imports` ranks
 dependency names for wanted imports with case insensitive matching,
 up to 50 names per call and 5 suggestions per name by default.
+`analyze_dependencies` reports which dependency JARs your compiled code
+references, which are named only by another dependency, and which no
+reference reaches, with the caveat that a class file scan cannot see
+reflection, `ServiceLoader`, a computed class name, or resources.
 
 ## Status
 
@@ -221,6 +265,11 @@ read into memory, so a lookup touches no file and the whole index of a
 project costs about 11 MB. A check of many files now pays the compiler
 once, not once per file. The tool answers twice, in lines and in
 structured content, and it never claims a class is missing when it could
-not look. Concurrent requests no longer kill the session. Coverage gates
-green on all 7 modules. Daemon deferred: sharing is safe by
+not look. Concurrent requests no longer kill the session. It now carries a
+bundled table of the JDK's API, so it answers JDK questions with no JDK
+on disk. Paths are resolved before they are compared, so a link cannot
+carry a read outside the project. A new `analyze_dependencies` tool and a
+`deps` command report which dependency JARs your code actually
+references. A slow test enforces the memory and time budget. Coverage
+gates green on all 7 modules. Daemon deferred: sharing is safe by
 construction, and answers in the same process are already fast.
