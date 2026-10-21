@@ -174,14 +174,14 @@ into the session. Install it and point it at the shaded JAR:
 
 ```text
 opencode plugin: opencode-plugin/importtruth.ts
-IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.4.0.jar
+IMPORT_TRUTH_JAR=<path>/importtruth-cli-0.5.0.jar
 ```
 
 For a small footprint, start the server with a capped heap and the
 serial collector:
 
 ```text
-java -Xms32m -Xmx96m -XX:+UseSerialGC -XX:MaxRAMPercentage=10 -Xss256k -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=16m -XX:ActiveProcessorCount=2 -XX:TieredStopAtLevel=1 -XX:CICompilerCount=2 -jar <path>/importtruth-cli-0.4.0.jar
+java -Xms32m -Xmx96m -XX:+UseSerialGC -XX:MaxRAMPercentage=10 -Xss256k -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=16m -XX:ActiveProcessorCount=2 -XX:TieredStopAtLevel=1 -XX:CICompilerCount=2 -jar <path>/importtruth-cli-0.5.0.jar
 ```
 
 Those flags are measured, not guessed. The serial collector alone is
@@ -227,7 +227,7 @@ and says `UNVERIFIED` for the ones it does not.
 Direct check of files (exit 1 on missing imports, silent when clean):
 
 ```text
-java -jar importtruth-cli/target/importtruth-cli-0.4.0.jar check <project> <file>...
+java -jar importtruth-cli/target/importtruth-cli-0.5.0.jar check <project> <file>...
 ```
 
 Which dependency JARs your code actually references (exit 0 on success,
@@ -235,7 +235,7 @@ exit 1 on failure). The project must have compiled classes, in
 `target/classes` or `target/test-classes`:
 
 ```text
-java -jar importtruth-cli/target/importtruth-cli-0.4.0.jar deps <project>
+java -jar importtruth-cli/target/importtruth-cli-0.5.0.jar deps <project>
 ```
 
 A sample hook config lives in `.pre-commit-config.yaml`. The MCP server
@@ -256,7 +256,7 @@ Shipped in 0.3.0: batch tools (`lookup_symbols`, `check_files`),
 warm checks under a second, ranked suggestions, JDK answers for every
 target release.
 
-Worked on for 0.5.0: nested types resolve under the name you write,
+Shipped in 0.5.0: nested types resolve under the name you write,
 suggestions offer only importable types, batch calls can no longer
 forge a verdict line, nested Maven modules join the classpath, and the
 resolver tells a cold plugin cache apart from a project that was never
