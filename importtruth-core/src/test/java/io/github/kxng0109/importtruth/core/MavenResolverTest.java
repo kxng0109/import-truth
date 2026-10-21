@@ -11,6 +11,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -18,16 +20,20 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.Execution;
 import org.junit.jupiter.api.parallel.ExecutionMode;
@@ -245,6 +251,54 @@ final class MavenResolverTest {
 	}
 
 	@Test
+	@DisplayName("finds nested modules declared in the aggregator pom")
+	void findsNestedModules() throws Exception {
+		Path root = state.resolve("nested");
+		Path api = root.resolve("services").resolve("api");
+		Files.createDirectories(api);
+		Files.writeString(root.resolve("pom.xml"),
+				"<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>root</artifactId><version>1</version>"
+						+ "<modules><module>services/api</module></modules></project>");
+		Files.writeString(api.resolve("pom.xml"),
+				"<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>api</artifactId><version>1</version></project>");
+
+		List<Path> modules = MavenResolver.modulesOf(root);
+
+		assertThat(modules).as("nested module found").contains(api);
+		assertThat(modules).as("aggregator included").contains(root);
+	}
+
+	@Test
+	@Tag("slow")
+	@DisplayName("reuses the cached classpath of a project with no dependencies")
+	void reusesEmptyClasspathCache() throws Exception {
+		Path root = state.resolve("empty");
+		Files.createDirectories(root);
+		Files.writeString(root.resolve("pom.xml"),
+				"<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>empty</artifactId><version>1</version></project>");
+		MavenResolver first = new MavenResolver(state);
+
+		assertThat(first.resolve(root, false)).as("no dependencies").isEmpty();
+
+		MavenResolver second = new MavenResolver(state);
+		long start = System.nanoTime();
+		List<Path> cached = second.resolve(root, false);
+		long millis = (System.nanoTime() - start) / 1_000_000;
+
+		assertThat(cached).as("cached empty classpath").isEmpty();
+		assertThat(millis).as("served from the cache, not a fresh Maven run")
+				.isLessThan(1_500L);
+		try (Stream<Path> leftovers = Files.list(root)) {
+			assertThat(leftovers.map(p -> p.getFileName().toString()))
+					.as("no scratch file left in the project")
+					.noneMatch(name -> name.startsWith(".importtruth-"));
+		}
+	}
+
+	@Test
 	@DisplayName("classifies missing tooling tails for online retry")
 	@SuppressWarnings("DataFlowIssue")
 	void classifiesToolingFailures() {
@@ -261,6 +315,11 @@ final class MavenResolverTest {
 				"exit=1 [ERROR] maven-dependency-plugin:3.11.0 could not be resolved in offline mode"))
 				.as("offline mode wording")
 				.isTrue();
+		assertThat(MavenResolver.isToolingFailure(
+				"exit=1 [ERROR] Plugin org.apache.maven.plugins:maven-dependency-plugin:3.11.0"
+						+ " or one of its dependencies could not be resolved: [Help 1]"
+						+ " http://cwiki.apache.org/confluence/display/maven/PluginResolutionException"))
+				.as("plugin exception name").isTrue();
 		assertThat(MavenResolver.isToolingFailure(
 				"exit=1 [ERROR] Failed to resolve org.example:missing:jar:1"))
 				.as("project dependency")
@@ -289,9 +348,32 @@ final class MavenResolverTest {
 	@Test
 	@DisplayName("names the warmup when the tooling cache is cold")
 	void namesWarmupHint() {
-		assertThat(MavenResolver.failureHint(true)).as("tooling hint")
+		assertThat(MavenResolver.failureHint(true, false, null)).as("tooling hint")
 				.contains("mvn -B -ntp compile");
-		assertThat(MavenResolver.failureHint(false)).as("sibling hint").contains("install");
+		assertThat(MavenResolver.failureHint(false, true, null)).as("project hint")
+				.contains("not in the local Maven repository");
+		assertThat(MavenResolver.failureHint(false, false, null)).as("sibling hint").contains("install");
+		assertThat(MavenResolver.failureHint(false, false,
+				"Goal requires a project to execute but there is no POM in this directory"))
+				.as("missing pom hint").contains("no pom.xml");
+		assertThat(MavenResolver.failureHint(false, false, "Could not create local repository at C:\\x"))
+				.as("repository hint").contains("local repository");
+	}
+
+	@Test
+	@DisplayName("tells a missing project dependency from a missing tool")
+	void tellsMissingProjectFromMissingTool() {
+		String project = "The following artifacts could not be resolved: com.example:lib:jar:1.0"
+				+ " (absent): Could not find artifact com.example:lib:jar:1.0 and the artifact"
+				+ " com.example:lib:jar:1.0 has not been downloaded from it before.";
+		String tooling = "Plugin org.apache.maven.plugins:maven-dependency-plugin:3.11.0 or one of its"
+				+ " dependencies could not be resolved: The artifact has not been downloaded from it before.";
+
+		assertThat(MavenResolver.isProjectDependencyMissing(project)).as("project dependency").isTrue();
+		assertThat(MavenResolver.isProjectDependencyMissing(tooling)).as("tooling is not a project")
+				.isFalse();
+		assertThat(MavenResolver.isProjectDependencyMissing(null)).as("null tail").isFalse();
+		assertThat(MavenResolver.isProjectDependencyMissing("")).as("blank tail").isFalse();
 	}
 
 	@Test
@@ -519,6 +601,509 @@ final class MavenResolverTest {
 			}
 			assertThat(interrupted.get()).as("worker saw the interrupt").isTrue();
 		}
+	}
+
+	@Test
+	@DisplayName("fails the followers when the leader dies")
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void failsFollowersWhenTheLeaderDies() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		CountDownLatch leaderInside = new CountDownLatch(1);
+		CountDownLatch followerWaiting = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		resolver.beforeResolve = () -> {
+			leaderInside.countDown();
+			await(release);
+			throw new OutOfMemoryError("simulated leader death");
+		};
+		resolver.followerJoined = followerWaiting::countDown;
+		Path project = state.resolve("leader");
+		Files.createDirectories(project);
+		AtomicReference<Throwable> leaderFailure = new AtomicReference<>();
+		long start = System.nanoTime();
+		ExecutorService pool = daemonPool(2);
+		try {
+			Future<?> leader = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+				} catch (Throwable failure) {
+					leaderFailure.set(failure);
+				}
+			});
+			assertThat(leaderInside.await(20, TimeUnit.SECONDS)).as("the leader started").isTrue();
+			Future<Throwable> follower = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+					return null;
+				} catch (Throwable failure) {
+					return failure;
+				}
+			});
+			assertThat(followerWaiting.await(20, TimeUnit.SECONDS)).as("the follower joined").isTrue();
+			release.countDown();
+			leader.get(30, TimeUnit.SECONDS);
+			Throwable seen = follower.get(30, TimeUnit.SECONDS);
+			long millis = (System.nanoTime() - start) / 1_000_000;
+
+			assertThat(leaderFailure.get()).as("the leader saw the error")
+					.isInstanceOf(OutOfMemoryError.class);
+			assertThat(seen).as("the follower failed clearly")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("Resolution failed")
+					.hasCauseInstanceOf(OutOfMemoryError.class);
+			assertThat(millis).as("the follower failed fast").isLessThan(20_000L);
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("gives up on a leader that never finishes")
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void givesUpOnALeaderThatNeverFinishes() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		resolver.followerWait = Duration.ofMillis(200);
+		CountDownLatch leaderInside = new CountDownLatch(1);
+		CountDownLatch followerWaiting = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		resolver.beforeResolve = () -> {
+			leaderInside.countDown();
+			await(release);
+		};
+		resolver.followerJoined = followerWaiting::countDown;
+		Path project = state.resolve("stuck");
+		Files.createDirectories(project);
+		ExecutorService pool = daemonPool(2);
+		try {
+			Future<?> leader = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+				} catch (Exception ignored) {
+					// The leader is released at the end of the test.
+				}
+			});
+			assertThat(leaderInside.await(20, TimeUnit.SECONDS)).as("the leader started").isTrue();
+			Future<Throwable> follower = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+					return null;
+				} catch (Throwable failure) {
+					return failure;
+				}
+			});
+			assertThat(followerWaiting.await(20, TimeUnit.SECONDS)).as("the follower joined").isTrue();
+			Throwable seen = follower.get(30, TimeUnit.SECONDS);
+
+			assertThat(seen).as("the follower gave up")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("Timed out");
+		} finally {
+			release.countDown();
+			pool.shutdown();
+			pool.awaitTermination(30, TimeUnit.SECONDS);
+		}
+	}
+
+	@Test
+	@DisplayName("prefers the system launcher over the project wrapper")
+	void prefersSystemLauncher() throws Exception {
+		Path root = Files.createTempDirectory("launcher");
+		try {
+			Files.write(root.resolve("mvnw.cmd"), "x".getBytes(StandardCharsets.UTF_8));
+
+			MavenResolver.Launcher chosen = MavenResolver.chooseLauncher(root, root, true, true);
+
+			assertThat(chosen.command()).as("the system launcher runs").containsExactly("mvn.cmd");
+			assertThat(chosen.description()).as("the reason names the launcher").contains("system mvn.cmd");
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@DisplayName("uses the project wrapper only when the system launcher is missing")
+	void usesProjectWrapperWithoutSystemLauncher() throws Exception {
+		Path root = Files.createTempDirectory("launcher");
+		try {
+			Files.write(root.resolve("mvnw.cmd"), "x".getBytes(StandardCharsets.UTF_8));
+
+			MavenResolver.Launcher chosen = MavenResolver.chooseLauncher(root, root, true, false);
+
+			assertThat(chosen.command()).as("the wrapper runs").containsExactly("cmd", "/d", "/c", "mvnw.cmd");
+			assertThat(chosen.description()).as("the reason names the launcher")
+					.contains("mvnw.cmd")
+					.contains("no system mvn.cmd on PATH");
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@DisplayName("never uses a wrapper above the project root")
+	void ignoresWrapperAboveProjectRoot() throws Exception {
+		Path outer = Files.createTempDirectory("outer");
+		try {
+			Files.write(outer.resolve("mvnw.cmd"), "x".getBytes(StandardCharsets.UTF_8));
+			Path project = outer.resolve("project");
+			Files.createDirectories(project);
+
+			assertThat(MavenResolver.findWrapper(project, project, true))
+					.as("the ancestor wrapper is not used")
+					.isNull();
+			MavenResolver.Launcher chosen = MavenResolver.chooseLauncher(project, project, true, false);
+
+			assertThat(chosen.command()).as("the system launcher runs instead").containsExactly("mvn.cmd");
+			assertThat(chosen.description()).as("the reason names the launcher")
+					.contains("no wrapper inside the project root");
+		} finally {
+			deleteTree(outer);
+		}
+	}
+
+	@Test
+	@DisplayName("finds the system launcher in a search path")
+	void findsSystemLauncher() throws Exception {
+		Path dir = Files.createTempDirectory("search");
+		try {
+			Files.write(dir.resolve("mvn.cmd"), "x".getBytes(StandardCharsets.UTF_8));
+
+			assertThat(MavenResolver.systemLauncherAvailable(true, List.of(dir)))
+					.as("windows launcher found").isTrue();
+			assertThat(MavenResolver.systemLauncherAvailable(true, List.of(dir.resolve("empty"))))
+					.as("missing launcher").isFalse();
+			assertThat(MavenResolver.systemLauncherAvailable(false, List.of(dir)))
+					.as("unix launcher not found").isFalse();
+			assertThat(MavenResolver.systemLauncherAvailable(true, List.of()))
+					.as("empty search path").isFalse();
+		} finally {
+			deleteTree(dir);
+		}
+	}
+
+	@Test
+	@DisplayName("names the launcher in a failure message")
+	void namesTheLauncherInFailures() {
+		String line = MavenResolver.moduleFailure("lib", "system mvn.cmd (available on PATH)", "exit=1 boom");
+
+		assertThat(line).as("the launcher is named").contains("system mvn.cmd");
+		assertThat(line).as("the module is named").contains("lib");
+		assertThat(line).as("the child output is kept").contains("exit=1 boom");
+	}
+
+	@Test
+	@DisplayName("gives the followers the result of the leader")
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void sharesTheLeaderResult() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		CountDownLatch leaderInside = new CountDownLatch(1);
+		CountDownLatch followerWaiting = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		resolver.beforeResolve = () -> {
+			leaderInside.countDown();
+			await(release);
+		};
+		resolver.followerJoined = followerWaiting::countDown;
+		Path project = state.resolve("shared");
+		Files.createDirectories(project);
+		ExecutorService pool = daemonPool(2);
+		try {
+			Future<List<Path>> leader = pool.submit(() -> resolver.resolve(project, false));
+			assertThat(leaderInside.await(20, TimeUnit.SECONDS)).as("the leader started").isTrue();
+			Future<List<Path>> follower = pool.submit(() -> resolver.resolve(project, false));
+			assertThat(followerWaiting.await(20, TimeUnit.SECONDS)).as("the follower joined").isTrue();
+			release.countDown();
+
+			assertThat(follower.get(30, TimeUnit.SECONDS)).as("the follower result").isEmpty();
+			assertThat(leader.get(30, TimeUnit.SECONDS)).as("the leader result").isEmpty();
+		} finally {
+			release.countDown();
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("fails the followers when the leader throws a runtime failure")
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void failsFollowersOnRuntimeFailure() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		CountDownLatch leaderInside = new CountDownLatch(1);
+		CountDownLatch followerWaiting = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		resolver.beforeResolve = () -> {
+			leaderInside.countDown();
+			await(release);
+			throw new IllegalStateException("simulated leader failure");
+		};
+		resolver.followerJoined = followerWaiting::countDown;
+		Path project = state.resolve("runtime");
+		Files.createDirectories(project);
+		ExecutorService pool = daemonPool(2);
+		try {
+			Future<?> leader = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+				} catch (Throwable ignored) {
+					// The leader saw the failure, as designed.
+				}
+			});
+			assertThat(leaderInside.await(20, TimeUnit.SECONDS)).as("the leader started").isTrue();
+			Future<Throwable> follower = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+					return null;
+				} catch (Throwable failure) {
+					return failure;
+				}
+			});
+			assertThat(followerWaiting.await(20, TimeUnit.SECONDS)).as("the follower joined").isTrue();
+			release.countDown();
+			leader.get(30, TimeUnit.SECONDS);
+			Throwable seen = follower.get(30, TimeUnit.SECONDS);
+
+			assertThat(seen).as("the follower failed clearly")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("Resolution failed")
+					.hasCauseInstanceOf(IllegalStateException.class);
+		} finally {
+			release.countDown();
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("fails the followers when the leader throws a checked failure")
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void failsFollowersOnCheckedFailure() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		CountDownLatch leaderInside = new CountDownLatch(1);
+		CountDownLatch followerWaiting = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		resolver.beforeResolve = () -> {
+			leaderInside.countDown();
+			await(release);
+			sneakyThrow(new Throwable("simulated checked failure"));
+		};
+		resolver.followerJoined = followerWaiting::countDown;
+		Path project = state.resolve("checked");
+		Files.createDirectories(project);
+		ExecutorService pool = daemonPool(2);
+		try {
+			Future<?> leader = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+				} catch (Throwable ignored) {
+					// The leader saw the failure, as designed.
+				}
+			});
+			assertThat(leaderInside.await(20, TimeUnit.SECONDS)).as("the leader started").isTrue();
+			Future<Throwable> follower = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+					return null;
+				} catch (Throwable failure) {
+					return failure;
+				}
+			});
+			assertThat(followerWaiting.await(20, TimeUnit.SECONDS)).as("the follower joined").isTrue();
+			release.countDown();
+			leader.get(30, TimeUnit.SECONDS);
+			Throwable seen = follower.get(30, TimeUnit.SECONDS);
+
+			assertThat(seen).as("the follower failed clearly")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("Resolution failed")
+					.hasCauseInstanceOf(Throwable.class);
+		} finally {
+			release.countDown();
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("gives up when a follower is interrupted")
+	@Timeout(value = 60, unit = TimeUnit.SECONDS)
+	void interruptsFollower() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		CountDownLatch leaderInside = new CountDownLatch(1);
+		CountDownLatch followerWaiting = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		resolver.beforeResolve = () -> {
+			leaderInside.countDown();
+			await(release);
+		};
+		resolver.followerJoined = followerWaiting::countDown;
+		Path project = state.resolve("interrupted");
+		Files.createDirectories(project);
+		AtomicReference<Throwable> seen = new AtomicReference<>();
+		ExecutorService pool = daemonPool(1);
+		try {
+			Future<?> leader = pool.submit(() -> {
+				try {
+					resolver.resolve(project, false);
+				} catch (Exception ignored) {
+					// The leader is released at the end of the test.
+				}
+			});
+			assertThat(leaderInside.await(20, TimeUnit.SECONDS)).as("the leader started").isTrue();
+			Thread follower = new Thread(() -> {
+				try {
+					resolver.resolve(project, false);
+				} catch (Throwable failure) {
+					seen.set(failure);
+				}
+			});
+			follower.setDaemon(true);
+			follower.start();
+			assertThat(followerWaiting.await(20, TimeUnit.SECONDS)).as("the follower joined").isTrue();
+			follower.interrupt();
+			follower.join(30_000);
+
+			assertThat(seen.get()).as("the follower gave up")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("Interrupted");
+			assertThat(follower.isInterrupted()).as("the interrupt flag was restored").isTrue();
+		} finally {
+			release.countDown();
+			pool.shutdown();
+			pool.awaitTermination(30, TimeUnit.SECONDS);
+		}
+	}
+
+	@Test
+	@DisplayName("runs the default seams without effect")
+	void defaultSeamsDoNothing() throws Exception {
+		MavenResolver resolver = new MavenResolver(state);
+		Path project = state.resolve("plain");
+		Files.createDirectories(project);
+
+		resolver.beforeResolve.run();
+		resolver.followerJoined.run();
+
+		assertThat(resolver.resolve(project, false)).as("the default seams change nothing").isEmpty();
+	}
+
+	@Test
+	@DisplayName("names the unix launcher")
+	void namesTheUnixLauncher() {
+		MavenResolver.Launcher chosen = MavenResolver.chooseLauncher(state, state, false, true);
+
+		assertThat(chosen.command()).as("the unix system launcher").containsExactly("mvn");
+		assertThat(chosen.description()).as("the reason names the launcher").contains("system mvn");
+	}
+
+	@Test
+	@EnabledOnOs(OS.WINDOWS)
+	@DisplayName("never uses a wrapper reached through a junction inside the project")
+	void ignoresWrapperReachedThroughJunction() throws Exception {
+		Path staging = FileCheckServiceTest.staging("maven-junction");
+		Path root = Files.createDirectories(staging.resolve("project"));
+		Path outside = Files.createDirectories(staging.resolve("outside"));
+		Path wrapper = outside.resolve("mvnw.cmd");
+		Files.write(wrapper, "x".getBytes(StandardCharsets.UTF_8));
+		Path link = root.resolve("link");
+		boolean survived = false;
+		try {
+			FileCheckServiceTest.junction(link, outside);
+
+			assertThat(MavenResolver.findWrapper(link, root, true))
+					.as("the wrapper reached through the junction is not used")
+					.isNull();
+		} finally {
+			FileCheckServiceTest.removeJunction(link);
+			survived = Files.exists(wrapper);
+			FileCheckServiceTest.deleteTree(staging);
+		}
+		assertThat(survived).as("the junction target survived the cleanup").isTrue();
+	}
+
+	@Test
+	@DisplayName("finds a wrapper in a nested module of the project")
+	void findsNestedModuleWrapper() throws Exception {
+		Path root = Files.createTempDirectory("nested");
+		try {
+			Path module = root.resolve("services").resolve("api");
+			Files.createDirectories(module);
+			Path wrapper = root.resolve("mvnw.cmd");
+			Files.write(wrapper, "x".getBytes(StandardCharsets.UTF_8));
+
+			assertThat(MavenResolver.findWrapper(module, root, true))
+					.as("the project wrapper is found")
+					.isEqualTo(wrapper.toAbsolutePath().normalize());
+		} finally {
+			deleteTree(root);
+		}
+	}
+
+	@Test
+	@DisplayName("skips malformed search path entries")
+	void skipsMalformedSearchPathEntries() {
+		// A NUL character cannot occur in a path on any platform, so
+		// the entry is malformed everywhere and not only on Windows.
+		String broken = "bad\u0000entry";
+		// A single path segment holds no path separator, so the split
+		// of the search path cannot cut it in two the way a drive
+		// letter is cut on a unix machine.
+		Path good = Path.of("good");
+		List<Path> dirs = MavenResolver.launcherSearchPath(
+				File.pathSeparator + good + File.pathSeparator + broken + File.pathSeparator + "   ",
+				broken, "   ");
+
+		assertThat(dirs).as("only the good entries").containsExactly(good);
+		assertThat(MavenResolver.launcherSearchPath("  ", null, null)).as("an empty search path").isEmpty();
+		assertThat(MavenResolver.launcherSearchPath(null, null, null)).as("a missing search path").isEmpty();
+		assertThat(MavenResolver.systemLauncherAvailable(true, Collections.singletonList(null)))
+				.as("a missing directory").isFalse();
+	}
+
+	@Test
+	@EnabledOnOs(OS.WINDOWS)
+	@DisplayName("keeps a drive path whole in the windows search path")
+	void keepsWindowsDrivePaths() {
+		List<Path> dirs = MavenResolver.launcherSearchPath("C:\\good", null, null);
+
+		assertThat(dirs).as("the drive path survives the split").containsExactly(Path.of("C:\\good"));
+	}
+
+	/**
+	 * Waits for a latch without throwing. A test seam must not fail
+	 * the run it steers.
+	 *
+	 * @param latch the latch to wait for, never null
+	 */
+	private static void await(CountDownLatch latch) {
+		try {
+			latch.await(5, TimeUnit.SECONDS);
+		} catch (InterruptedException interrupted) {
+			Thread.currentThread().interrupt();
+		}
+	}
+
+	/**
+	 * Throws a checked failure the compiler cannot see. A leader that
+	 * fails this way must still release its followers.
+	 *
+	 * @param <T>     the thrown type
+	 * @param failure the failure to throw, never null
+	 * @throws T always
+	 */
+	@SuppressWarnings("unchecked")
+	private static <T extends Throwable> void sneakyThrow(Throwable failure) throws T {
+		throw (T) failure;
+	}
+
+	/**
+	 * Creates a pool whose threads never hold the run open. A leader
+	 * that never finishes must not keep the suite from ending.
+	 *
+	 * @param size the number of threads, positive
+	 * @return the pool, never null
+	 */
+	private static ExecutorService daemonPool(int size) {
+		return Executors.newFixedThreadPool(size, runnable -> {
+			Thread thread = new Thread(runnable);
+			thread.setDaemon(true);
+			return thread;
+		});
 	}
 
 	/** Stream that fails on every read. */

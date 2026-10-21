@@ -120,9 +120,32 @@ final class LookupSearchTest {
 		LookupResult missing = services.lookup().lookup(project, "Widget");
 
 		assertThat(missing.found()).as("missing").isFalse();
-		assertThat(missing.suggestions()).as("five suggestions across jars")
-				.hasSize(5)
+		assertThat(missing.suggestions()).as("type suggestions across jars")
+				.hasSize(2)
 				.contains("com.example.Widget", "com.example.WidgetInfo");
+	}
+
+	@Test
+	@DisplayName("marks a miss unverified when the JDK API cannot be consulted")
+	void marksUnverifiedMiss() throws Exception {
+		Path jar = project.resolve("dep.jar");
+		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new ZipEntry("META-INF/"));
+			zip.closeEntry();
+		}
+		JarIndexStore store = openStore(state.resolve("unverified-index"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
+		// No runtime image and no archive: a build that cannot consult
+		// the JDK API at all, as a native image cannot.
+		LookupService lookup =
+				new LookupService(store, indexer, resolver, new JdkIndex(null, null, List.of()));
+
+		LookupResult miss = lookup.lookup(project, "java.util.List");
+
+		assertThat(miss.found()).as("not found").isFalse();
+		assertThat(miss.jdkChecked()).as("jdk not consulted").isFalse();
 	}
 
 	@Test
@@ -189,6 +212,21 @@ final class LookupSearchTest {
 	}
 
 	@Test
+	@DisplayName("finds nested types written either way")
+	void findsNestedTypesEitherWay() throws Exception {
+		Services services = nestedServices();
+
+		LookupResult dotted = services.lookup().lookup(project, "com.example.Outer.Inner");
+		LookupResult binary = services.lookup().lookup(project, "com.example.Outer$Inner");
+
+		assertThat(dotted.found()).as("dotted spelling").isTrue();
+		assertThat(binary.found()).as("binary spelling").isTrue();
+		assertThat(dotted.matches()).as("match detail").hasSize(1);
+		assertThat(dotted.matches().get(0).fqn()).as("source name")
+				.isEqualTo("com.example.Outer.Inner");
+	}
+
+	@Test
 	@DisplayName("rejects null batch inputs")
 	@SuppressWarnings("DataFlowIssue")
 	void rejectsNullBatch() throws Exception {
@@ -201,6 +239,36 @@ final class LookupSearchTest {
 				.as("null symbols rejection")
 				.isInstanceOf(NullPointerException.class);
 	}
+	@Test
+	@DisplayName("answers a blank symbol with a miss")
+	void answersBlankSymbol() throws Exception {
+		Services services = services();
+
+		LookupResult blank = services.lookup().lookup(project, "   ");
+
+		assertThat(blank.found()).as("blank misses").isFalse();
+		assertThat(blank.confidence()).as("blank candidate").isEqualTo(Confidence.CANDIDATE);
+	}
+
+	@Test
+	@DisplayName("answers a targeted JDK symbol in a single lookup")
+	void answersTargetedJdkInSingleLookup() throws Exception {
+		Services services = services();
+		Files.write(project.resolve("pom.xml"),
+				("<project><modelVersion>4.0.0</modelVersion><groupId>t</groupId>"
+						+ "<artifactId>targeted</artifactId><version>1</version><properties>"
+						+ "<maven.compiler.release>21</maven.compiler.release></properties></project>")
+						.getBytes(StandardCharsets.UTF_8));
+
+		LookupResult jdk = services.lookup().lookup(project, "java.util.ArrayList");
+
+		assertThat(jdk.fromJdk()).as("targeted JDK hit").isTrue();
+
+		LookupResult miss = services.lookup().lookup(project, "org.example.Nope");
+
+		assertThat(miss.found()).as("targeted JDK miss").isFalse();
+	}
+
 	@Test
 	@DisplayName("search caps rows")
 	void searchCapsRows() throws Exception {
@@ -215,6 +283,24 @@ final class LookupSearchTest {
 		assertThatThrownBy(() -> services.search().search(project, "com.example", 0))
 				.as("non-positive limit rejected")
 				.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	private Services nestedServices() throws IOException {
+		Path jar = project.resolve("nested.jar");
+		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
+			zip.putNextEntry(new ZipEntry("META-INF/"));
+			zip.closeEntry();
+		}
+		JarIndexStore store = openStore(state.resolve("nested"));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Outer", SymbolKind.CLASS, null, null, false, "", false),
+				new Symbol("com.example.Outer.Inner", SymbolKind.CLASS, null, null, false, "", false),
+				new Symbol("com.example.Outer.Inner.run", SymbolKind.METHOD, "()V",
+						"com.example.Outer.Inner", false, "", false));
+		DependencyResolver resolver = (projectDir, allowNetwork) -> List.of(jar);
+		return new Services(
+				new LookupService(store, indexer, resolver, new JdkIndex()),
+				new SearchService(store, indexer, resolver));
 	}
 
 	private Services services() throws IOException {

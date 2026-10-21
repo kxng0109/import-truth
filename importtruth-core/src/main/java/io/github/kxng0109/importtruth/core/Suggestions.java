@@ -3,6 +3,7 @@ package io.github.kxng0109.importtruth.core;
 import io.github.kxng0109.importtruth.index.JarIndexStore;
 import io.github.kxng0109.importtruth.model.Packages;
 import io.github.kxng0109.importtruth.model.Symbol;
+import io.github.kxng0109.importtruth.model.SymbolKind;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -87,8 +88,8 @@ public final class Suggestions {
 				continue;
 			}
 			List<Symbol> matches = insensitive
-					? store.searchInInsensitive(db, simple, collected)
-					: store.searchIn(db, simple, collected);
+					? store.searchInInsensitive(db, simple, collected, SymbolKind.types())
+					: store.searchIn(db, simple, collected, SymbolKind.types());
 			for (Symbol match : matches) {
 				names.add(match.fqn());
 				if (names.size() >= collected) {

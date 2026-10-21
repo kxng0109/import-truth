@@ -1,10 +1,12 @@
 package io.github.kxng0109.importtruth.mcp;
 
 import io.github.kxng0109.importtruth.core.SuggestService;
+import io.github.kxng0109.importtruth.model.Packages;
 import io.modelcontextprotocol.spec.McpSchema;
 
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -68,7 +70,8 @@ public final class SuggestImportsTool {
 	/**
 	 * Handles a batch suggest call. Resolver failures fail the whole
 	 * call with {@code isError=true}; blank or mistyped items become
-	 * inline {@code ERROR} lines inside a success result.
+	 * inline {@code ERROR} lines inside a success result. The structured
+	 * content holds one answer per requested name, in request order.
 	 *
 	 * @param arguments tool arguments, never null
 	 * @return successful result with one block per name, or an error result
@@ -78,43 +81,45 @@ public final class SuggestImportsTool {
 		Optional<String> project = McpArgs.string(arguments, "projectPath");
 		Optional<List<?>> raw = McpArgs.strings(arguments, "names");
 		if (project.isEmpty()) {
-			return McpResults.err("projectPath is a required string");
+			String message = "projectPath is a required string";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		if (raw.isEmpty()) {
-			return McpResults.err("names is a required non-empty array");
+			String message = "names is a required non-empty array";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		List<?> items = raw.get();
 		if (items.size() > MAX_NAMES) {
-			return McpResults.err("at most " + MAX_NAMES + " names per call");
+			String message = "at most " + MAX_NAMES + " names per call";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		int limit = limitOf(arguments.get("limit"));
 		List<String> valid = new ArrayList<>();
 		for (Object item : items) {
-			if (item instanceof String name && !name.isBlank()) {
-				valid.add(name);
+			if (McpArgs.usableItem(item)) {
+				valid.add((String) item);
 			}
-		}
-		if (valid.isEmpty()) {
-			List<String> errors = new ArrayList<>();
-			for (Object item : items) {
-				if (!(item instanceof String name) || name.isBlank()) {
-					errors.add("ERROR name must be a non-blank string");
-				}
-			}
-			return McpResults.ok(errors);
 		}
 		Map<String, List<String>> answers;
-		try {
-			answers = suggest.suggestBatch(Paths.get(project.get()), valid, limit);
-		} catch (Exception failure) {
-			return McpResults.err("suggest failed: " + failure);
+		if (valid.isEmpty()) {
+			answers = Map.of();
+		} else {
+			try {
+				answers = suggest.suggestBatch(Paths.get(project.get()), valid, limit);
+			} catch (Exception failure) {
+				String message = "suggest failed: " + failure;
+				return McpResults.err(message, McpResults.failure(message));
+			}
 		}
 		List<String> lines = new ArrayList<>();
+		List<Map<String, Object>> answersPerName = new ArrayList<>();
 		for (Object item : items) {
-			if (!(item instanceof String name) || name.isBlank()) {
-				lines.add("ERROR name must be a non-blank string");
+			if (!McpArgs.usableItem(item)) {
+				lines.add("ERROR name must be a non-blank single-line string");
+				answersPerName.add(McpResults.failure("name must be a non-blank single-line string"));
 				continue;
 			}
+			String name = (String) item;
 			List<String> found = answers.getOrDefault(name, List.of());
 			if (found.isEmpty()) {
 				lines.add("no suggestions for " + name);
@@ -124,8 +129,100 @@ public final class SuggestImportsTool {
 					lines.add("maybe: " + candidate);
 				}
 			}
+			answersPerName.add(answer(name, found));
 		}
-		return McpResults.ok(lines);
+		return McpResults.ok(lines, results(answersPerName));
+	}
+
+	/**
+	 * Builds the machine readable answer of one wanted name. The status
+	 * says whether anything was suggested. Every suggestion carries the
+	 * importable name, the identifier the import binds, and how the
+	 * candidate matched the wanted name.
+	 *
+	 * @param name  wanted fully qualified name, never null
+	 * @param found suggested names, best first, never null
+	 * @return structured content, never null
+	 */
+	private static Map<String, Object> answer(String name, List<String> found) {
+		Objects.requireNonNull(name, "name");
+		Objects.requireNonNull(found, "found");
+		Map<String, Object> content = new LinkedHashMap<>();
+		content.put("status", found.isEmpty() ? "NOT_FOUND" : "FOUND");
+		content.put("name", name);
+		List<Map<String, Object>> suggestions = new ArrayList<>(found.size());
+		for (String candidate : found) {
+			Map<String, Object> entry = new LinkedHashMap<>();
+			entry.put("name", candidate);
+			entry.put("descriptor", Packages.simpleName(candidate));
+			entry.put("match", match(name, candidate));
+			suggestions.add(entry);
+		}
+		content.put("suggestions", suggestions);
+		return content;
+	}
+
+	/**
+	 * Classifies how a candidate matched the wanted name, with the
+	 * buckets the ranker uses: the exact simple name first, the wanted
+	 * package second, everything else after.
+	 *
+	 * @param wanted    wanted fully qualified name, never null
+	 * @param candidate suggested fully qualified name, never null
+	 * @return {@code EXACT}, {@code PACKAGE}, or {@code OTHER}
+	 */
+	private static String match(String wanted, String candidate) {
+		String wantSimple = Packages.simpleName(plain(wanted));
+		if (Packages.simpleName(candidate).equals(wantSimple)) {
+			return "EXACT";
+		}
+		String wantPackage = Packages.packageName(plain(wanted));
+		if (!wantPackage.isEmpty() && candidate.startsWith(wantPackage + ".")) {
+			return "PACKAGE";
+		}
+		return "OTHER";
+	}
+
+	/**
+	 * Strips type arguments and array suffixes so a wanted name is
+	 * compared the way the ranker compares it. The core keeps the same
+	 * rule private to its own package.
+	 *
+	 * @param name wanted name, never null
+	 * @return plain name, never null
+	 */
+	private static String plain(String name) {
+		StringBuilder kept = new StringBuilder();
+		int depth = 0;
+		for (int i = 0; i < name.length(); i++) {
+			char current = name.charAt(i);
+			if (current == '<') {
+				depth++;
+			} else if (current == '>') {
+				depth = Math.max(0, depth - 1);
+			} else if (depth == 0) {
+				kept.append(current);
+			}
+		}
+		String plain = kept.toString();
+		while (plain.endsWith("[]")) {
+			plain = plain.substring(0, plain.length() - 2);
+		}
+		return plain;
+	}
+
+	/**
+	 * Wraps the per name answers in the structured content of a batch.
+	 * The list keeps the request order, so an answer lines up with the
+	 * name that was asked about.
+	 *
+	 * @param answers one answer per requested name, never null
+	 * @return structured content, never null
+	 */
+	private static Map<String, Object> results(List<Map<String, Object>> answers) {
+		Map<String, Object> content = new LinkedHashMap<>();
+		content.put("results", answers);
+		return content;
 	}
 
 	static int limitOf(Object raw) {

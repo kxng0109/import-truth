@@ -49,6 +49,19 @@ final class McpArgs {
 	}
 
 	/**
+	 * Tests whether a batch item is a usable value. A batch item must
+	 * obey the same rules as a single argument: non-blank and on one
+	 * line, so a value can never forge extra lines in a result.
+	 *
+	 * @param item raw item, possibly null
+	 * @return true when the item is a non-blank single-line string
+	 */
+	static boolean usableItem(Object item) {
+		return item instanceof String text && !text.isBlank()
+				&& text.indexOf('\n') < 0 && text.indexOf('\r') < 0;
+	}
+
+	/**
 	 * Clamps a limit argument into range, defaulting when absent.
 	 *
 	 * @param raw     argument value, possibly null

@@ -104,6 +104,18 @@ final class FullServerE2ETest {
 					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
 					+ "\",\"symbol\":\"com.example.Widget\"}}}");
 			assertThat(awaitLine(lines, "\"id\":2")).as("lookup answer").contains("FOUND DEFINITE");
+			streams.write("{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\",\"params\":{\"name\":\"lookup_symbol\","
+					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
+					+ "\",\"symbol\":\"org.example.Widget\"}}}");
+			String miss = awaitLine(lines, "\"id\":8");
+			assertThat(miss).as("miss answer")
+					.containsPattern("\"text\"\\s*:\\s*\"NOT_FOUND org\\.example\\.Widget");
+			assertThat(miss).as("no confidence token in the text").doesNotContainPattern("NOT_FOUND CANDIDATE");
+			assertThat(miss).as("structured content on the wire").contains("\"structuredContent\"");
+			assertThat(miss).as("verdict on the wire")
+					.containsPattern("\"status\"\\s*:\\s*\"NOT_FOUND\"");
+			assertThat(miss).as("name on the wire")
+					.containsPattern("\"name\"\\s*:\\s*\"org\\.example\\.Widget\"");
 			streams.write("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"check_file\","
 					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
 					+ "\",\"filePath\":\"" + escape(file.toString()) + "\"}}}");
@@ -123,6 +135,11 @@ final class FullServerE2ETest {
 					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString())
 					+ "\",\"filePaths\":[\"" + escape(file.toString()) + "\"]}}}");
 			assertThat(awaitLine(lines, "\"id\":7")).as("batch check answer").contains("clean");
+			streams.write("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"analyze_dependencies\","
+					+ "\"arguments\":{\"projectPath\":\"" + escape(project.toString()) + "\"}}}");
+			String analysis = awaitLine(lines, "\"id\":9");
+			assertThat(analysis).as("analysis answer").contains("UNVERIFIED dep.jar");
+			assertThat(analysis).as("no candidate without the compiled classes").doesNotContain("UNREFERENCED");
 		}
 		assertThat(errors).as("reader thread errors").isEmpty();
 	}

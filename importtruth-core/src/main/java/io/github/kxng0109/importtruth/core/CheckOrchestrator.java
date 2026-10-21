@@ -7,14 +7,19 @@ import io.github.kxng0109.importtruth.model.Finding;
 import io.github.kxng0109.importtruth.model.FindingKind;
 import io.github.kxng0109.importtruth.model.ImportVerdict;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
-import io.github.kxng0109.importtruth.model.Packages;
 import io.github.kxng0109.importtruth.model.PolicyHit;
+import io.github.kxng0109.importtruth.model.Symbol;
+import io.github.kxng0109.importtruth.model.SymbolKind;
+import io.github.kxng0109.importtruth.model.TypeNames;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -27,7 +32,49 @@ import java.util.function.Function;
  */
 public final class CheckOrchestrator {
 
+	/**
+	 * Maximum retained scope keys. A session touches few classpaths at
+	 * a time, and the keys hold paths, not file contents.
+	 */
+	static final int MAX_SCOPE_KEYS = 128;
+
+	/**
+	 * The memoised scope keys. Least recently used retention keeps the
+	 * map bounded.
+	 */
+	private static final Map<Scope, String> SCOPE_KEYS =
+			Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+				@Override
+				protected boolean removeEldestEntry(Map.Entry<Scope, String> eldest) {
+					return size() > MAX_SCOPE_KEYS;
+				}
+			});
+
+	/**
+	 * The number of memoised scope keys. Not final: a test reads it to
+	 * prove the cache stays bounded.
+	 *
+	 * @return the number of retained scope keys
+	 */
+	static int cachedScopeKeys() {
+		return SCOPE_KEYS.size();
+	}
+
 	private CheckOrchestrator() {
+	}
+
+	/**
+	 * The inputs of one scope key. Two scopes with the same inputs
+	 * describe the same classpath, the same own packages, the same
+	 * build definition, and the same target release.
+	 *
+	 * @param jars   library files, never null
+	 * @param dbs    index files, never null
+	 * @param own    own-project packages, never null
+	 * @param target target major release
+	 * @param build  signature of the build definition, never null
+	 */
+	private record Scope(List<Path> jars, List<Path> dbs, Set<String> own, int target, String build) {
 	}
 
 	/**
@@ -55,6 +102,10 @@ public final class CheckOrchestrator {
 	 * Keys one validation: jar identities, index files, own packages,
 	 * and the running JDK. Any change revalidates.
 	 *
+	 * <p>The key is memoised. The index files carry the content hash of
+	 * the jars they were built from, so an unchanged key means an
+	 * unchanged classpath, and a repeated call stamps no jar again.
+	 *
 	 * @param jars library files, never null
 	 * @param dbs  index files, never null
 	 * @param own  own-project packages, never null
@@ -66,6 +117,33 @@ public final class CheckOrchestrator {
 		Objects.requireNonNull(jars, "jars");
 		Objects.requireNonNull(dbs, "dbs");
 		Objects.requireNonNull(own, "own");
+		// The own packages carry the project they came from, so the
+		// build definition joins the key. A changed build file then
+		// revalidates the policy rules even when the classpath did
+		// not move.
+		String build = ProjectPackages.buildSignature(own);
+		Scope scope = new Scope(jars, dbs, own, target, build);
+		String remembered = SCOPE_KEYS.get(scope);
+		if (remembered != null) {
+			return remembered;
+		}
+		String built = buildScopeKey(jars, dbs, own, target) + "\nbuild=" + build;
+		SCOPE_KEYS.put(scope, built);
+		return built;
+	}
+
+	/**
+	 * Builds the scope key of a classpath.
+	 *
+	 * @param jars library files, never null
+	 * @param dbs  index files, never null
+	 * @param own  own-project packages, never null
+	 * @param target target major release
+	 * @return scope key, never null
+	 * @throws IOException when jar stats cannot be read
+	 */
+	private static String buildScopeKey(List<Path> jars, List<Path> dbs, Set<String> own, int target)
+			throws IOException {
 		StringBuilder key = new StringBuilder();
 		for (Path jar : jars) {
 			key.append(jar.toAbsolutePath()).append(':').append(JarStamp.key(jar)).append('\n');
@@ -88,10 +166,45 @@ public final class CheckOrchestrator {
 			JarIndexStore store, JdkIndex jdk, List<Path> dbs, String name, int target) {
 		try {
 			boolean jdkHit = target >= 0 ? jdk.existsIn(name, target) : jdk.exists(name);
-			return store.existsAcross(dbs, name) || jdkHit;
+			return existsSource(store, dbs, name) || jdkHit;
 		} catch (IOException failed) {
 			return false;
 		}
+	}
+
+	/**
+	 * Finds symbols under both spellings of a nested type name.
+	 *
+	 * @param store index store, never null
+	 * @param dbs   index files, never null
+	 * @param name  fully qualified name, never null
+	 * @return matches, never null
+	 * @throws IOException when index reads fail
+	 */
+	public static List<Symbol> findBoth(JarIndexStore store, List<Path> dbs, String name) throws IOException {
+		List<Symbol> matches = store.findAcross(dbs, name);
+		if (!matches.isEmpty()) {
+			return matches;
+		}
+		String alternate = TypeNames.alternate(name);
+		return alternate == null ? List.of() : store.findAcross(dbs, alternate);
+	}
+
+	/**
+	 * Tests whether a name resolves as source code writes it. A
+	 * nested type is written {@code Outer.Inner}; the class file
+	 * spelling {@code Outer$Inner} is not a legal import, so an
+	 * import check must not accept it. A top level class whose own
+	 * name holds a dollar sign keeps it and still resolves.
+	 *
+	 * @param store index store, never null
+	 * @param dbs   index files, never null
+	 * @param name  fully qualified name, never null
+	 * @return true when the name is present
+	 * @throws IOException when index reads fail
+	 */
+	public static boolean existsSource(JarIndexStore store, List<Path> dbs, String name) throws IOException {
+		return store.existsAcross(dbs, name);
 	}
 
 	/**
@@ -99,21 +212,55 @@ public final class CheckOrchestrator {
 	 */
 	public static boolean packageResolves(
 			JarIndexStore store, JdkIndex jdk, List<Path> dbs, Set<String> own, String name, int target) {
-		for (String pkg : own) {
-			if (Packages.coveredBy(name, pkg)) {
-				return true;
-			}
-		}
 		try {
-			for (Path db : dbs) {
-				if (!store.searchPrefix(db, name + ".", 1).isEmpty()) {
-					return true;
-				}
-			}
+			return typeOrPackageResolves(store, jdk, dbs, own, name, target);
 		} catch (IOException failed) {
 			return false;
 		}
+	}
+
+	/**
+	 * Tests whether a name can be imported on demand: it must name a
+	 * type, or a package that holds one. A member never qualifies.
+	 *
+	 * @param store index store, never null
+	 * @param jdk   JDK index, never null
+	 * @param dbs   index files, never null
+	 * @param own   own-project packages, never null
+	 * @param name  qualified name, never null
+	 * @param target target major release
+	 * @return true when the name resolves
+	 * @throws IOException when index reads fail
+	 */
+	public static boolean typeOrPackageResolves(
+			JarIndexStore store, JdkIndex jdk, List<Path> dbs, Set<String> own, String name, int target)
+			throws IOException {
+		if (ProjectPackages.covers(own, name)) {
+			return true;
+		}
+		for (Path db : dbs) {
+			if (holdsType(store.findIn(db, name))
+					|| holdsType(store.searchPrefix(db, name + ".", 1, SymbolKind.types()))) {
+				return true;
+			}
+		}
 		return target >= 0 ? jdk.packageExistsIn(name, target) : jdk.packageExists(name);
+	}
+
+	/**
+	 * Tests whether any match is a type. A member never makes a name
+	 * importable on its own.
+	 *
+	 * @param matches indexed symbols, never null
+	 * @return true when at least one match names a type
+	 */
+	private static boolean holdsType(List<Symbol> matches) {
+		for (Symbol match : matches) {
+			if (SymbolKind.isType(match.kind())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

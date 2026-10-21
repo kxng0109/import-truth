@@ -20,6 +20,16 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # The lookup tests spawn a child Maven that reads the same local
+      # repository as this build. Maven 3.10 records the provenance of a
+      # downloaded artifact under a key that carries the repository URL,
+      # while Maven 3.9 reads the plain repository id, so a repository
+      # written by the build looks unavailable to the child and the
+      # child downloads the world again. The id only key is the form
+      # every Maven version reads and writes. setup-java appends its own
+      # transfer flag to this value, and the spawned child inherits it.
+      MAVEN_ARGS: "-Daether.system.trackingRepositoryKeyFunction=nid"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -31,6 +41,12 @@ jobs:
           cache: maven
       - name: Make wrapper executable
         run: chmod +x mvnw
+      - name: Warm the pinned resolver tooling
+        # The spawned children need the pinned dependency plugin. Maven
+        # does not let two processes write one local repository, and the
+        # tests spawn children in parallel, so fetching the plugin once
+        # here keeps the children out of a race over the repository.
+        run: ./mvnw -B -q org.apache.maven.plugins:maven-dependency-plugin:3.11.0:help -Dgoal=build-classpath -Ddetail=false
       - name: Verify
         # install (not just verify): lookup tests spawn nested Maven runs
         # that resolve sibling snapshots from the repository.

@@ -17,13 +17,19 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarOutputStream;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -195,6 +201,32 @@ final class FileCheckServiceTest {
 	}
 
 	@Test
+	@DisplayName("resolves a wildcard import of a type with no public members")
+	void resolvesMemberlessTypeWildcard() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/other/Memberless.java",
+				"package com.other; import com.example.Empty.*; public class Memberless { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.healthy()).as("healthy file").isTrue();
+		assertThat(result.findings()).as("wildcard resolved").isEmpty();
+	}
+
+	@Test
+	@DisplayName("rejects a class file spelling in an import")
+	void rejectsBinarySpellingInImport() throws Exception {
+		FileCheckService check = service();
+		Path file = source("com/other/Binary.java",
+				"package com.other; import com.example.Outer$Inner; public class Binary { }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.findings()).as("binary spelling rejected").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("missing kind").isEqualTo(FindingKind.MISSING);
+	}
+
+	@Test
 	@DisplayName("treats bare own-package names as candidates")
 	void treatsBareOwnNamesAsCandidates() throws Exception {
 		FileCheckService check = service();
@@ -222,8 +254,29 @@ final class FileCheckServiceTest {
 		assertThat(result.healthy()).as("healthy file").isTrue();
 		assertThat(result.findings()).as("one finding").hasSize(1);
 		assertThat(result.findings().get(0).kind()).as("missing kind").isEqualTo(FindingKind.MISSING);
-		assertThat(result.findings().get(0).suggestion()).as("three suggestions")
-				.isEqualTo("maybe: com.example.Widget, com.example.Widget.help, com.example.Widget.build");
+		assertThat(result.findings().get(0).suggestion()).as("type suggestions only")
+				.isEqualTo("maybe: com.example.Widget");
+	}
+
+	@Test
+	@DisplayName("a package that no longer exists resolves nothing")
+	void deletedPackageResolvesNothing() throws Exception {
+		FileCheckService check = service();
+		Path widget = source("com/acme/Widget.java",
+				"package com.acme; public class Widget { }");
+		Path file = source("com/other/Wild.java",
+				"package com.other; import com.acme.*; public class Wild { }");
+
+		assertThat(check.check(project, file).findings())
+				.as("wildcard resolved while the package exists")
+				.isEmpty();
+
+		Files.delete(widget);
+
+		CheckResult after = check.check(project, file);
+		assertThat(after.findings()).as("wildcard no longer resolves").hasSize(1);
+		assertThat(after.verdicts()).as("one verdict").hasSize(1);
+		assertThat(after.verdicts().get(0).resolved()).as("the import does not resolve").isFalse();
 	}
 
 	@Test
@@ -244,7 +297,161 @@ final class FileCheckServiceTest {
 		}
 	}
 
+	@Test
+	@DisplayName("rejects a sibling directory that shares the project prefix")
+	void rejectsSiblingWithSharedPrefix() throws Exception {
+		FileCheckService check = service();
+		Path sibling = project.resolveSibling(project.getFileName().toString() + "-sibling");
+		Path file = sibling.resolve("com/example/Sibling.java");
+		Files.createDirectories(file.getParent());
+		Files.write(file, "package com.example; public class Sibling { }".getBytes(StandardCharsets.UTF_8));
+		try {
+			assertThatThrownBy(() -> check.check(project, file))
+					.as("the sibling file is rejected")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("outside the project");
+		} finally {
+			deleteTree(sibling);
+		}
+	}
+
+	@Test
+	@DisplayName("rejects a file that is not there")
+	void rejectsMissingFile() throws Exception {
+		FileCheckService check = service();
+		Path missing = project.resolve("src/main/java/com/example/Missing.java");
+
+		assertThatThrownBy(() -> check.check(project, missing))
+				.as("a missing file is an error")
+				.isInstanceOf(IOException.class)
+				.hasMessageContaining("does not exist");
+	}
+
+	@Test
+	@DisplayName("rejects a project root that is not there")
+	void rejectsMissingProjectRoot() throws Exception {
+		FileCheckService check = service();
+		Path root = project.resolveSibling(project.getFileName().toString() + "-absent");
+		Path file = root.resolve("com/example/Absent.java");
+
+		assertThatThrownBy(() -> check.check(root, file))
+				.as("a missing project root is an error")
+				.isInstanceOf(IOException.class)
+				.hasMessageContaining("does not exist");
+	}
+
+	@Test
+	@EnabledOnOs(OS.WINDOWS)
+	@DisplayName("rejects a file reached through a junction inside the project")
+	void rejectsFileReachedThroughJunction() throws Exception {
+		Path staging = staging("file-check-junction");
+		Path root = Files.createDirectories(staging.resolve("project"));
+		Path outside = Files.createDirectories(staging.resolve("outside"));
+		Path secret = outside.resolve("Secret.java");
+		Files.write(secret, "package secret; import org.example.Nope; public class Secret { }"
+				.getBytes(StandardCharsets.UTF_8));
+		Path inside = root.resolve("src/main/java/com/example/Secret.java");
+		Files.createDirectories(inside.getParent());
+		Files.write(inside, "package com.example; import java.util.List; public class Secret { }"
+				.getBytes(StandardCharsets.UTF_8));
+		Path link = root.resolve("link");
+		boolean survived = false;
+		try {
+			junction(link, outside);
+			FileCheckService check = service();
+
+			assertThatThrownBy(() -> check.check(root, link.resolve("Secret.java")))
+					.as("the file reached through the junction is rejected")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("outside the project");
+
+			assertThat(check.check(root, inside).healthy())
+					.as("the same file by its real path inside the project is accepted")
+					.isTrue();
+			assertThat(check.check(root, inside.toAbsolutePath()).healthy())
+					.as("the same file by its absolute real path is accepted")
+					.isTrue();
+		} finally {
+			removeJunction(link);
+			survived = Files.exists(secret);
+			deleteTree(staging);
+		}
+		assertThat(survived).as("the junction target survived the cleanup").isTrue();
+	}
+
+	@Test
+	@DisplayName("checks a batch with the answers of the single file path")
+	void checksBatchLikeSingleFiles() throws Exception {
+		FileCheckService check = service();
+		Path clean = source("com/example/BatchClean.java",
+				"package com.example; import java.util.List; public class BatchClean { List<String> a; }");
+		Path missing = source("com/other/BatchMissing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class BatchMissing { Nope n; }");
+		Path broken = source("com/other/BatchBroken.java",
+				"package com.other; import java.util.List; public class BatchBroken { void x( { } }");
+		Path file = source("com/other/BatchOther.java",
+				"package com.other; import java.util.Map; public class BatchOther { Map<String,String> m; }");
+		List<Path> files = List.of(clean, missing, broken, file);
+
+		Map<Path, CheckResult> answers = check.checkAll(project, files, List.of(), Set.of());
+
+		for (Path each : files) {
+			CheckResult batch = answers.get(each);
+			CheckResult single = check.checkWith(project, each, List.of(), Set.of());
+			assertThat(batch.healthy()).as("health of " + each.getFileName())
+					.isEqualTo(single.healthy());
+			assertThat(batch.findings()).as("findings of " + each.getFileName())
+					.isEqualTo(single.findings());
+			assertThat(batch.verdicts()).as("verdicts of " + each.getFileName())
+					.isEqualTo(single.verdicts());
+		}
+		assertThat(answers.get(missing).findings()).as("missing import flagged").hasSize(1);
+		assertThat(answers.get(broken).findings()).as("broken file silent").isEmpty();
+	}
+
+	@Test
+	@DisplayName("rejects a batch that leaves the project")
+	void rejectsBatchOutsideProject() throws Exception {
+		FileCheckService check = service();
+		Path outside = Files.createTempFile("Elsewhere", ".java");
+		try {
+			Files.write(outside,
+					"import org.example.Nope; public class Elsewhere { Nope n; }".getBytes(StandardCharsets.UTF_8));
+
+			assertThatThrownBy(() -> check.checkAll(project, List.of(outside), List.of(), Set.of()))
+					.as("outside file rejected")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("outside the project");
+		} finally {
+			Files.deleteIfExists(outside);
+		}
+	}
+
+	@Test
+	@DisplayName("leaves a JDK import unverified when the JDK API cannot be consulted")
+	void leavesJdkImportUnverified() throws Exception {
+		FileCheckService check = serviceWithoutJdk();
+		Path file = source("com/example/Use.java",
+				"package com.example; import java.util.List; public class Use { List<String> items; }");
+
+		CheckResult result = check.check(project, file);
+
+		assertThat(result.findings()).as("one finding").hasSize(1);
+		assertThat(result.findings().get(0).kind()).as("unverified, not missing")
+				.isEqualTo(FindingKind.CANDIDATE);
+		assertThat(result.findings().get(0).detail()).as("says why")
+				.contains("JDK API index is unavailable");
+	}
+
 	private FileCheckService service() throws IOException {
+		return serviceWith(new JdkIndex());
+	}
+
+	private FileCheckService serviceWithoutJdk() throws IOException {
+		return serviceWith(new JdkIndex(null, null, List.of()));
+	}
+
+	private FileCheckService serviceWith(JdkIndex jdk) throws IOException {
 		Path jar = project.resolve("dep.jar");
 		try (OutputStream out = Files.newOutputStream(jar); JarOutputStream zip = new JarOutputStream(out)) {
 			zip.putNextEntry(new ZipEntry("META-INF/"));
@@ -258,7 +465,7 @@ final class FileCheckServiceTest {
 				return List.of(jar);
 			}
 		};
-		return new FileCheckService(store, indexer, resolver, new JdkIndex());
+		return new FileCheckService(store, indexer, resolver, jdk);
 	}
 
 	private Path source(String relative, String content) throws IOException {
@@ -268,6 +475,80 @@ final class FileCheckServiceTest {
 		return file;
 	}
 
+	/**
+	 * Creates a directory junction. A junction needs no privilege, and
+	 * the JDK resolves one to its target, so a path spelled inside the
+	 * project can name a file outside it.
+	 *
+	 * @param link   junction to create, never null
+	 * @param target directory the junction points at, never null
+	 * @throws IOException when the junction cannot be created
+	 * @throws InterruptedException when the command is interrupted
+	 */
+	static void junction(Path link, Path target) throws IOException, InterruptedException {
+		Process process = new ProcessBuilder("cmd", "/d", "/c", "mklink", "/J",
+				link.toString(), target.toString())
+				.redirectErrorStream(true)
+				.start();
+		String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+		if (process.waitFor() != 0) {
+			throw new IOException("mklink /J failed: " + output.trim());
+		}
+	}
+
+	/**
+	 * Removes a junction without touching its target. A recursive
+	 * delete would follow the junction into the target, so the junction
+	 * is removed the way Windows removes it.
+	 *
+	 * @param link junction to remove, never null
+	 * @throws IOException when the junction cannot be removed
+	 * @throws InterruptedException when the command is interrupted
+	 */
+	static void removeJunction(Path link) throws IOException, InterruptedException {
+		Process process = new ProcessBuilder("cmd", "/d", "/c", "rmdir", link.toString())
+				.redirectErrorStream(true)
+				.start();
+		String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+		if (process.waitFor() != 0) {
+			throw new IOException("rmdir failed: " + output.trim());
+		}
+	}
+
+	/**
+	 * The directory a junction test stages its files in. It sits under
+	 * the .tmp folder of the repository, so a test that fails half way
+	 * leaves its files where they can be found and removed. The target
+	 * of the junction is a sibling of the project inside that folder,
+	 * so even a mistaken recursive delete can only reach scratch
+	 * files.
+	 *
+	 * @param name name of the staging directory, never null
+	 * @return the staging directory, never null
+	 * @throws IOException when the staging directory cannot be created
+	 */
+	static Path staging(String name) throws IOException {
+		Path repository = Paths.get(System.getProperty("user.dir")).getParent();
+		Path staging = repository.resolve(".tmp").resolve(name);
+		Files.createDirectories(staging);
+		return staging;
+	}
+
+	/**
+	 * Removes a directory tree, if it is there.
+	 *
+	 * @param root tree to remove, never null
+	 */
+	static void deleteTree(Path root) {
+		try (Stream<Path> walk = Files.walk(root)) {
+			for (Path path : walk.sorted(Comparator.reverseOrder()).toList()) {
+				Files.deleteIfExists(path);
+			}
+		} catch (IOException ignored) {
+			// Best effort: the staging area is disposable.
+		}
+	}
+
 	/** Canned dependency symbols, no bytecode involved. */
 	private static final class FakeIndexer implements LibraryIndexer {
 
@@ -275,6 +556,8 @@ final class FileCheckServiceTest {
 		public List<Symbol> index(Path jar) {
 			return List.of(
 					new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
+					new Symbol("com.example.Outer.Inner", SymbolKind.CLASS, null, null, false, "", false),
+					new Symbol("com.example.Empty", SymbolKind.CLASS, null, null, false, "", false),
 					new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
 							"com.example.Widget", false, "", false),
 					new Symbol("com.example.Widget.help", SymbolKind.METHOD, "()V",

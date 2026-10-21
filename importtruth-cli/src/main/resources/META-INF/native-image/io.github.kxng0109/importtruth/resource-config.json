@@ -1,0 +1,39 @@
+{
+  "resources": {
+    "includes": [
+      {
+        "pattern": "packs/.*\\.yaml"
+      },
+      {
+        "pattern": "jdk-api/.*\\.txt"
+      },
+      {
+        "pattern": "jdk-api/"
+      },
+      {
+        "pattern": "META-INF/services/io.github.kxng0109.importtruth.model.LibraryIndexer"
+      },
+      {
+        "pattern": "META-INF/services/io.github.kxng0109.importtruth.model.ClassReferenceScanner"
+      },
+      {
+        "pattern": "META-INF/services/io.modelcontextprotocol.json.McpJsonMapperSupplier"
+      },
+      {
+        "pattern": "META-INF/services/io.modelcontextprotocol.json.schema.JsonSchemaValidatorSupplier"
+      },
+      {
+        "pattern": "META-INF/services/org.slf4j.spi.SLF4JServiceProvider"
+      },
+      {
+        "pattern": "META-INF/services/java.nio.file.spi.FileSystemProvider"
+      },
+      {
+        "pattern": "META-INF/services/javax.xml.parsers.DocumentBuilderFactory"
+      },
+      {
+        "pattern": "draft/.*"
+      }
+    ]
+  }
+}

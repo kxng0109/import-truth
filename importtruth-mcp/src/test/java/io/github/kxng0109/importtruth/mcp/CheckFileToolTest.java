@@ -19,6 +19,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarOutputStream;
@@ -200,7 +201,7 @@ final class CheckFileToolTest {
 
 		closeStores();
 		try (var indexes = Files.list(state.resolve("index"))) {
-			for (Path db : indexes.filter(p -> p.toString().endsWith(".mv.db")).toList()) {
+			for (Path db : indexes.filter(p -> p.toString().endsWith(".idx")).toList()) {
 				Files.write(db, "corrupt".getBytes(StandardCharsets.UTF_8));
 			}
 		}
@@ -225,6 +226,239 @@ final class CheckFileToolTest {
 		assertThat(((TextContent) result.content().get(0)).text())
 				.as("names the violation")
 				.contains("outside the project");
+	}
+
+	@Test
+	@DisplayName("carries the verdict of a clean file")
+	void carriesCleanVerdict() throws Exception {
+		CheckFileTool tool = tool();
+		Path clean = file("Clean.java",
+				"package com.other; import java.util.List; public class Clean { List<String> items; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", clean.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(textOf(result)).as("rendered text").isEqualTo("clean");
+		assertThat(structured).as("status").containsEntry("status", "CLEAN");
+		assertThat(structured).as("file").containsEntry("file", clean.toString());
+		assertThat(structured).as("finding count").containsEntry("findingCount", 0);
+		assertThat(structured.get("findings")).as("no findings").isEqualTo(List.of());
+	}
+
+	@Test
+	@DisplayName("carries every finding of a file")
+	void carriesFindings() throws Exception {
+		CheckFileTool tool = tool();
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", missing.toString()));
+		Map<String, Object> structured = structuredOf(result);
+		List<Map<String, Object>> findings = listOf(structured, "findings");
+
+		assertThat(textOf(result)).as("rendered text").contains("MISSING").contains("org.example.Nope");
+		assertThat(structured).as("status").containsEntry("status", "FINDINGS");
+		assertThat(structured).as("finding count").containsEntry("findingCount", 1);
+		assertThat(findings).as("one finding").hasSize(1);
+		assertThat(findings.get(0)).as("kind").containsEntry("kind", "MISSING");
+		assertThat(findings.get(0)).as("a missing import does not resolve").containsEntry("resolved", false);
+		assertThat(findings.get(0)).as("line").containsEntry("line", 2);
+		assertThat(findings.get(0)).as("text")
+				.containsEntry("text", "import org.example.Nope resolves nowhere");
+		assertThat(findings.get(0)).as("no suggestion without candidates").doesNotContainKey("suggestion");
+	}
+
+	@Test
+	@DisplayName("marks a policy finding as resolved")
+	void marksPolicyFindingResolved() throws Exception {
+		CheckFileTool tool = tool();
+		Path legacy = file("Legacy.java",
+				"package com.other; import com.fasterxml.jackson.databind.ObjectMapper;"
+						+ " public class Legacy { ObjectMapper mapper; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", legacy.toString()));
+		List<Map<String, Object>> findings = listOf(structuredOf(result), "findings");
+
+		assertThat(findings).as("one finding").hasSize(1);
+		assertThat(findings.get(0)).as("kind").containsEntry("kind", "POLICY");
+		assertThat(findings.get(0)).as("a policy hit is a resolved import").containsEntry("resolved", true);
+		assertThat(findings.get(0)).as("line").containsEntry("line", 1);
+		assertThat((String) findings.get(0).get("text")).as("detail").contains("tools.jackson.databind");
+		assertThat((String) findings.get(0).get("suggestion")).as("suggestion")
+				.contains("tools.jackson.databind.ObjectMapper");
+		assertThat(textOf(result)).as("rendered text carries the same detail")
+				.contains((String) findings.get(0).get("text"));
+	}
+
+	@Test
+	@DisplayName("leaves an unverified finding without a verdict")
+	void leavesUnverifiedFindingOpen() throws Exception {
+		CheckFileTool tool = tool();
+		Path own = file("Own.java", "package com.other;\nimport com.other.Own;\npublic class Own { }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", own.toString()));
+		List<Map<String, Object>> findings = listOf(structuredOf(result), "findings");
+
+		assertThat(findings).as("one finding").hasSize(1);
+		assertThat(findings.get(0)).as("kind").containsEntry("kind", "CANDIDATE");
+		assertThat(findings.get(0)).as("an unverified import has no verdict").doesNotContainKey("resolved");
+		assertThat((String) findings.get(0).get("text")).as("detail")
+				.isEqualTo("import com.other.Own project-owned or generated, unverified");
+	}
+
+	@Test
+	@DisplayName("marks a failed call as an error")
+	void marksFailedCall() throws Exception {
+		CheckFileTool failing = failingTool();
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+
+		CallToolResult result = failing.call(Map.of("projectPath", project.toString(), "filePath", missing.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(result.isError()).as("error flag").isTrue();
+		assertThat(structured).as("status").containsEntry("status", "ERROR");
+		assertThat((String) structured.get("message")).as("message").contains("check failed");
+		assertThat(structured).as("a failure carries no verdict").doesNotContainKey("findings");
+	}
+
+	@Test
+	@DisplayName("marks a rejected call as an error")
+	void marksRejectedCall() {
+		CheckFileTool tool = tool();
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(result.isError()).as("error flag").isTrue();
+		assertThat(structured).as("status").containsEntry("status", "ERROR");
+		assertThat((String) structured.get("message")).as("message").contains("required strings");
+	}
+
+	@Test
+	@DisplayName("marks an unreadable file as an error")
+	void marksUnreadableFile() throws Exception {
+		CheckFileTool tool = tool();
+		Path broken = file("Broken.java",
+				"package com.other; import java.util.List; public class Broken { void x( { } }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", broken.toString()));
+		Map<String, Object> structured = structuredOf(result);
+
+		assertThat(textOf(result)).as("rendered text").startsWith("ERROR ").contains("Broken.java");
+		assertThat(structured).as("status").containsEntry("status", "ERROR");
+		assertThat(structured).as("file").containsEntry("file", broken.toString());
+		assertThat((String) structured.get("message")).as("message").contains("could not be parsed");
+	}
+
+	@Test
+	@DisplayName("accepts a path relative to the project")
+	void acceptsProjectRelativePath() throws Exception {
+		CheckFileTool tool = tool();
+		file("Clean.java", "package com.other; import java.util.List; public class Clean { List<String> items; }");
+		String relative = Paths.get("src", "main", "java", "com", "other", "Clean.java").toString();
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", relative));
+
+		assertThat(result.isError()).as("project relative path accepted").isFalse();
+		assertThat(textOf(result)).as("clean answer").isEqualTo("clean");
+	}
+
+	@Test
+	@DisplayName("keeps a working directory path that lands inside the project")
+	void keepsWorkingDirectoryPath() throws Exception {
+		Path scratch = workingDirectoryProject();
+		try {
+			CheckFileTool tool = tool();
+			Path source = scratch.resolve("src/main/java/com/other/Clean.java");
+			Files.write(source,
+					"package com.other; import java.util.List; public class Clean { List<String> items; }"
+							.getBytes(StandardCharsets.UTF_8));
+			Path shadow = scratch.resolve("target/importtruth-cwd-project/src/main/java/com/other/Clean.java");
+			Files.createDirectories(shadow.getParent());
+			Files.write(shadow,
+					"package com.other;\nimport org.example.Nope;\npublic class Clean { Nope nope; }"
+							.getBytes(StandardCharsets.UTF_8));
+			String relative = Paths.get("").toAbsolutePath().relativize(source).toString();
+
+			CallToolResult result = tool.call(Map.of("projectPath", scratch.toString(), "filePath", relative));
+
+			assertThat(result.isError()).as("working directory path accepted").isFalse();
+			assertThat(textOf(result)).as("the working directory file wins").isEqualTo("clean");
+			assertThat(structuredOf(result)).as("the file stays as asked").containsEntry("file", relative);
+		} finally {
+			deleteTree(scratch);
+		}
+	}
+
+	@Test
+	@DisplayName("rejects a relative path that leaves the project")
+	void rejectsEscapingRelativePath() throws Exception {
+		CheckFileTool tool = tool();
+		String escaping = Paths.get("..", "outside", "Nope.java").toString();
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", escaping));
+
+		assertThat(result.isError()).as("escaping path flagged").isTrue();
+		assertThat(((TextContent) result.content().get(0)).text())
+				.as("names the violation")
+				.contains("outside the project");
+	}
+
+	@Test
+	@DisplayName("keeps the answer of a file that already worked")
+	void keepsAnswerShape() throws Exception {
+		CheckFileTool tool = tool();
+		Path missing = file("Missing.java",
+				"package com.other;\nimport org.example.Nope;\npublic class Missing { Nope nope; }");
+
+		CallToolResult result = tool.call(Map.of("projectPath", project.toString(), "filePath", missing.toString()));
+
+		assertThat(textOf(result)).as("rendered line").isEqualTo(
+				"src/main/java/com/other/Missing.java:2 MISSING import org.example.Nope resolves nowhere");
+		assertThat(structuredOf(result)).as("structured content").isEqualTo(Map.of(
+				"status", "FINDINGS",
+				"file", missing.toString(),
+				"findingCount", 1,
+				"findings", List.of(Map.of(
+						"kind", "MISSING",
+						"resolved", false,
+						"line", 2,
+						"text", "import org.example.Nope resolves nowhere"))));
+	}
+
+	/**
+	 * Creates a project under the process working directory, so a path
+	 * relative to the working directory lands inside it. The project is
+	 * scratch: the test removes it again.
+	 *
+	 * @return the scratch project root, never null
+	 * @throws IOException when the scratch project cannot be written
+	 */
+	private Path workingDirectoryProject() throws IOException {
+		Path scratch = Paths.get("").toAbsolutePath().resolve("target").resolve("importtruth-cwd-project");
+		deleteTree(scratch);
+		Files.createDirectories(scratch.resolve("src/main/java/com/other"));
+		return scratch;
+	}
+
+	/**
+	 * Removes a directory tree, if it is there.
+	 *
+	 * @param root tree to remove, never null
+	 * @throws IOException when the tree cannot be removed
+	 */
+	private static void deleteTree(Path root) throws IOException {
+		if (!Files.exists(root)) {
+			return;
+		}
+		List<Path> paths;
+		try (var walk = Files.walk(root)) {
+			paths = walk.sorted(Comparator.reverseOrder()).toList();
+		}
+		for (Path path : paths) {
+			Files.deleteIfExists(path);
+		}
 	}
 
 	private CheckFileTool tool() {
@@ -272,5 +506,18 @@ final class CheckFileToolTest {
 	private static String textOf(CallToolResult result) {
 		assertThat(result.isError()).as("no tool error").isFalse();
 		return ((TextContent) result.content().get(0)).text();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Map<String, Object> structuredOf(CallToolResult result) {
+		assertThat(result.structuredContent()).as("structured content present").isInstanceOf(Map.class);
+		return (Map<String, Object>) result.structuredContent();
+	}
+
+	@SuppressWarnings("unchecked")
+	private static List<Map<String, Object>> listOf(Map<String, Object> structured, String key) {
+		Object value = structured.get(key);
+		assertThat(value).as("list under " + key).isInstanceOf(List.class);
+		return (List<Map<String, Object>>) value;
 	}
 }

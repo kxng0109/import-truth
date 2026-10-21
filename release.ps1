@@ -67,7 +67,10 @@ if (-not $Finish) {
 	$releaseBranch = "release-$tag"
 	Invoke-Step "commit on $releaseBranch" {
 		git checkout -b $releaseBranch
-		git add -A
+		# Stage the version stamp only. "git add -A" would sweep in any
+		# untracked file, and documents and the session state must never
+		# reach a commit.
+		git add --update
 		git commit -m "release $tag"
 		git push origin HEAD
 	}
@@ -103,7 +106,8 @@ $bumpBranch = "bump-$Next"
 Invoke-Step "open next iteration $Next" {
 	cmd /d /c "$mvnw -B -ntp versions:set ""-DnewVersion=$Next"" -DgenerateBackupPoms=false"
 	git checkout -b $bumpBranch
-	git add -A
+	# Stage the version bump only, for the same reason as above.
+	git add --update
 	git commit -m 'prepare next development iteration'
 	git push origin HEAD
 	gh pr create --title 'prepare next development iteration' --body "Version bump to $Next after $tag."

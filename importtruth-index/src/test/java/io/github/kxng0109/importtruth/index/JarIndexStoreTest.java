@@ -11,9 +11,11 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -21,6 +23,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.AfterEach;
@@ -31,7 +34,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Verifies store mechanics with a fake extractor: round trip, search,
- * struct Trust, single-flight, and temp cleanup.
+ * single flight, the bounded wait for the indexing leader, the one read
+ * per file rule, and temp cleanup.
  */
 @DisplayName("JarIndexStore")
 final class JarIndexStoreTest {
@@ -70,7 +74,7 @@ final class JarIndexStoreTest {
 		Path jar = fakeJar("first.jar");
 		Path db = store.ensureIndexed(jar, indexer);
 
-		assertThat(db.getFileName().toString()).as("content-addressed name").endsWith(".mv.db");
+		assertThat(db.getFileName().toString()).as("content-addressed name").endsWith(".v4.idx");
 		assertThat(store.findIn(db, "com.example.Widget"))
 				.as("exact match")
 				.hasSize(1)
@@ -91,6 +95,49 @@ final class JarIndexStoreTest {
 					.as("no temp files left")
 					.isEqualTo(0L);
 		}
+	}
+
+	@Test
+	@DisplayName("filters search results by kind")
+	void filtersByKind() throws Exception {
+		JarIndexStore store = openStore("kinds");
+		Path db = store.ensureIndexed(fakeJar("kinds.jar"), new FakeIndexer());
+
+		assertThat(store.searchIn(db, "Widg", 5, SymbolKind.types())).as("types only")
+				.isNotEmpty()
+				.allSatisfy(symbol -> assertThat(SymbolKind.isType(symbol.kind())).isTrue());
+		assertThat(store.searchIn(db, "Widg", 5, Set.of(SymbolKind.METHOD))).as("methods only")
+				.isNotEmpty()
+				.allSatisfy(symbol -> assertThat(symbol.kind()).isEqualTo(SymbolKind.METHOD));
+		assertThat(store.searchIn(db, "Widg", 1)).as("one hit stops the scan").hasSize(1);
+		assertThat(store.searchInInsensitive(db, "widget", 5, SymbolKind.types())).as("types only")
+				.isNotEmpty()
+				.allSatisfy(symbol -> assertThat(SymbolKind.isType(symbol.kind())).isTrue());
+		assertThat(store.searchInInsensitive(db, "widget", 1)).as("one hit stops the scan").hasSize(1);
+		assertThat(store.searchPrefix(db, "com.example.", 5, SymbolKind.types())).as("types only")
+				.isNotEmpty()
+				.allSatisfy(symbol -> assertThat(SymbolKind.isType(symbol.kind())).isTrue());
+		assertThat(store.searchPrefix(db, "com.example.", 1, SymbolKind.types())).as("limited to types")
+				.isNotEmpty()
+				.allSatisfy(symbol -> assertThat(SymbolKind.isType(symbol.kind())).isTrue());
+	}
+
+	@Test
+	@DisplayName("removes index files from an older format")
+	void prunesStaleIndexes() throws Exception {
+		Path dir = state.resolve("prune");
+		Files.createDirectories(dir);
+		Path stale = dir.resolve("oldsha.mv.db");
+		Path recent = dir.resolve("othersha.mv.db");
+		Files.writeString(stale, "old");
+		Files.writeString(recent, "recent");
+		Files.setLastModifiedTime(stale, FileTime.fromMillis(System.currentTimeMillis() - 7_200_000L));
+		Files.setLastModifiedTime(recent, FileTime.fromMillis(System.currentTimeMillis()));
+
+		openStore("prune");
+
+		assertThat(Files.exists(stale)).as("stale index removed").isFalse();
+		assertThat(Files.exists(recent)).as("recent file kept").isTrue();
 	}
 
 	@Test
@@ -267,6 +314,171 @@ final class JarIndexStoreTest {
 			assertThat(indexer.runs.get()).as("extractor invocations").isEqualTo(1);
 		} finally {
 			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("reads one file once for many readers")
+	@Timeout(value = 30, unit = TimeUnit.SECONDS)
+	void readsOneFileOnce() throws Exception {
+		JarIndexStore store = openStore("single-flight");
+		Path db = store.ensureIndexed(fakeJar("flight.jar"), new ManySymbols());
+		int threads = 8;
+		CountDownLatch gate = new CountDownLatch(1);
+		ExecutorService pool = Executors.newFixedThreadPool(threads);
+		try {
+			List<Future<List<Symbol>>> runs = new ArrayList<>();
+			for (int i = 0; i < threads; i++) {
+				runs.add(pool.submit(() -> {
+					gate.await(10, TimeUnit.SECONDS);
+					return store.findIn(db, "com.example.Widget");
+				}));
+			}
+			gate.countDown();
+			for (Future<List<Symbol>> run : runs) {
+				assertThat(run.get(20, TimeUnit.SECONDS)).as("reader answered").hasSize(1);
+			}
+			assertThat(store.fileReads()).as("the file was read once").isEqualTo(1);
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("gives up on a follower that waits too long for the leader")
+	@Timeout(value = 30, unit = TimeUnit.SECONDS)
+	void givesUpOnWaitingFollower() throws Exception {
+		long before = JarIndexStore.followerTimeoutMillis;
+		JarIndexStore.followerTimeoutMillis = 500L;
+		JarIndexStore store = openStore("follower-timeout");
+		Path jar = fakeJar("follower-timeout.jar");
+		CountDownLatch entered = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		LibraryIndexer slow = jarFile -> {
+			entered.countDown();
+			try {
+				release.await(20, TimeUnit.SECONDS);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				throw new IOException("interrupted", interrupted);
+			}
+			return List.of();
+		};
+		ExecutorService pool = Executors.newFixedThreadPool(2);
+		try {
+			Future<Path> leader = pool.submit(() -> store.ensureIndexed(jar, slow));
+			assertThat(entered.await(10, TimeUnit.SECONDS)).as("leader entered").isTrue();
+			Future<Path> follower = pool.submit(() -> store.ensureIndexed(jar, slow));
+
+			assertThatThrownBy(() -> follower.get(10, TimeUnit.SECONDS))
+					.as("the follower gives up instead of waiting for ever")
+					.isInstanceOf(ExecutionException.class)
+					.hasMessageContaining("timed out");
+			release.countDown();
+			leader.get(20, TimeUnit.SECONDS);
+		} finally {
+			release.countDown();
+			pool.shutdownNow();
+			JarIndexStore.followerTimeoutMillis = before;
+		}
+	}
+
+	@Test
+	@DisplayName("releases a follower when the leader fails with an error")
+	@Timeout(value = 30, unit = TimeUnit.SECONDS)
+	void releasesFollowerWhenLeaderFails() throws Exception {
+		JarIndexStore store = openStore("leader-error");
+		Path jar = fakeJar("leader-error.jar");
+		CountDownLatch entered = new CountDownLatch(1);
+		LibraryIndexer failing = jarFile -> {
+			entered.countDown();
+			throw new OutOfMemoryError("no heap left");
+		};
+		ExecutorService pool = Executors.newFixedThreadPool(2);
+		try {
+			Future<Path> leader = pool.submit(() -> store.ensureIndexed(jar, failing));
+			assertThat(entered.await(10, TimeUnit.SECONDS)).as("leader entered").isTrue();
+			Future<Path> follower = pool.submit(() -> store.ensureIndexed(jar, failing));
+
+			assertThatThrownBy(() -> follower.get(10, TimeUnit.SECONDS))
+					.as("the follower is released")
+					.isInstanceOf(ExecutionException.class)
+					.hasMessageContaining("Indexing failed");
+			assertThatThrownBy(() -> leader.get(10, TimeUnit.SECONDS))
+					.as("the leader fails too")
+					.isInstanceOf(ExecutionException.class);
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("releases a follower that is interrupted")
+	@Timeout(value = 30, unit = TimeUnit.SECONDS)
+	void releasesInterruptedFollower() throws Exception {
+		JarIndexStore store = openStore("follower-interrupt");
+		Path jar = fakeJar("follower-interrupt.jar");
+		CountDownLatch entered = new CountDownLatch(1);
+		CountDownLatch release = new CountDownLatch(1);
+		LibraryIndexer slow = jarFile -> {
+			entered.countDown();
+			try {
+				release.await(20, TimeUnit.SECONDS);
+			} catch (InterruptedException interrupted) {
+				Thread.currentThread().interrupt();
+				throw new IOException("interrupted", interrupted);
+			}
+			return List.of();
+		};
+		ExecutorService pool = Executors.newFixedThreadPool(1);
+		try {
+			Future<Path> leader = pool.submit(() -> store.ensureIndexed(jar, slow));
+			assertThat(entered.await(10, TimeUnit.SECONDS)).as("leader entered").isTrue();
+			AtomicReference<Throwable> caught = new AtomicReference<>();
+			Thread follower = new Thread(() -> {
+				try {
+					store.ensureIndexed(jar, slow);
+				} catch (Throwable failure) {
+					caught.set(failure);
+				}
+			});
+			follower.start();
+			Thread.sleep(500);
+			follower.interrupt();
+			follower.join(10_000);
+
+			assertThat(caught.get()).as("the interrupted follower gives up")
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("interrupted");
+			release.countDown();
+			leader.get(20, TimeUnit.SECONDS);
+		} finally {
+			release.countDown();
+			pool.shutdownNow();
+		}
+	}
+
+	@Test
+	@DisplayName("holds many indexes and releases them under the budget")
+	void evictsEldestUnderBudget() throws Exception {
+		long before = JarIndexStore.cacheBudget;
+		JarIndexStore store = openStore("evict-many");
+		FakeIndexer indexer = new FakeIndexer();
+		Path first = store.ensureIndexed(fakeJar("evict-one.jar"), indexer);
+		Path second = store.ensureIndexed(fakeJar("evict-two.jar"), indexer);
+		assertThat(store.findIn(first, "com.example.Widget")).as("first held").hasSize(1);
+		assertThat(store.findIn(second, "com.example.Widget")).as("second held").hasSize(1);
+		int reads = store.fileReads();
+
+		JarIndexStore.cacheBudget = 1L;
+		try {
+			Path third = store.ensureIndexed(fakeJar("evict-three.jar"), indexer);
+			assertThat(store.findIn(third, "com.example.Widget")).as("third held").hasSize(1);
+			assertThat(store.fileReads()).as("the budget forced a release").isGreaterThan(reads);
+			assertThat(store.findIn(first, "com.example.Widget")).as("first again").hasSize(1);
+			assertThat(store.findIn(second, "com.example.Widget")).as("second again").hasSize(1);
+		} finally {
+			JarIndexStore.cacheBudget = before;
 		}
 	}
 
@@ -507,6 +719,24 @@ final class JarIndexStoreTest {
 					new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
 					new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
 							"com.example.Widget", true, "2.0", false));
+		}
+	}
+
+	/**
+	 * A file large enough that readers pile up on one load, so the
+	 * single flight can be observed.
+	 */
+	private static final class ManySymbols implements LibraryIndexer {
+
+		@Override
+		public List<Symbol> index(Path jar) {
+			List<Symbol> symbols = new ArrayList<>(20_000);
+			symbols.add(new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false));
+			for (int i = 0; i < 20_000; i++) {
+				symbols.add(new Symbol("com.example.Type" + i, SymbolKind.CLASS,
+						"Ljava/lang/Object;()V", null, false, "", false));
+			}
+			return symbols;
 		}
 	}
 }

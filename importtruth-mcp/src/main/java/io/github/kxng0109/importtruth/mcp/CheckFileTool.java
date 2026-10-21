@@ -12,23 +12,15 @@ import io.github.kxng0109.importtruth.model.CheckResult;
 import io.github.kxng0109.importtruth.model.Finding;
 import io.github.kxng0109.importtruth.model.FindingKind;
 import io.github.kxng0109.importtruth.model.Findings;
-import io.github.kxng0109.importtruth.model.ImportVerdict;
 import io.github.kxng0109.importtruth.model.LibraryIndexer;
-import io.github.kxng0109.importtruth.model.PolicyHit;
 import io.github.kxng0109.importtruth.model.PolicyPack;
-import io.github.kxng0109.importtruth.model.PolicyRule;
 import io.github.kxng0109.importtruth.policy.PackLoader;
 import io.github.kxng0109.importtruth.policy.PolicyCache;
 import io.github.kxng0109.importtruth.policy.PolicyEngine;
 import io.github.kxng0109.importtruth.policy.PolicyValidator;
 import io.modelcontextprotocol.spec.McpSchema;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.PrintStream;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -91,7 +83,12 @@ public final class CheckFileTool {
 	}
 
 	/**
-	 * Handles a check call.
+	 * Handles a check call. The file path is resolved against the
+	 * project root first, so a path written relative to the project
+	 * finds its file. The rendered lines stay as they were; the
+	 * structured content carries the same answer for a machine, with
+	 * every finding spelled out. A file that could not be parsed
+	 * answers with an error, never with a verdict.
 	 *
 	 * @param arguments tool arguments, never null
 	 * @return successful result with one line per finding, or an error result
@@ -101,22 +98,24 @@ public final class CheckFileTool {
 		Optional<String> project = McpArgs.string(arguments, "projectPath");
 		Optional<String> file = McpArgs.string(arguments, "filePath");
 		if (project.isEmpty() || file.isEmpty()) {
-			return McpResults.err("projectPath and filePath are required strings");
+			String message = "projectPath and filePath are required strings";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		String projectPath = project.get();
 		String filePath = file.get();
 		try {
-			List<String> lines = check(Paths.get(projectPath), Paths.get(filePath));
-			if (lines.isEmpty()) {
-				lines.add("clean");
-			}
-			return McpResults.ok(lines);
+			Path projectDir = Paths.get(projectPath);
+			Path source = ProjectPaths.resolve(projectDir, Paths.get(filePath));
+			FileAnswer answer = checkFile(projectDir, source);
+			List<String> lines = answer.lines().isEmpty() ? List.of("clean") : answer.lines();
+			return McpResults.ok(lines, structured(answer));
 		} catch (Exception failure) {
-			return McpResults.err("check failed: " + failure);
+			String message = "check failed: " + failure;
+			return McpResults.err(message, McpResults.failure(message));
 		}
 	}
 
-	private List<String> check(Path projectDir, Path file) throws IOException {
+	private FileAnswer checkFile(Path projectDir, Path file) throws IOException {
 		return checkFiles(projectDir, List.of(file)).get(file);
 	}
 
@@ -129,31 +128,44 @@ public final class CheckFileTool {
 	 * @return findings per file, in order, never null
 	 * @throws IOException when resolution, indexing, or pack loading fails
 	 */
-	Map<Path, List<String>> checkFiles(Path projectDir, List<Path> files) throws IOException {
+	Map<Path, FileAnswer> checkFiles(Path projectDir, List<Path> files) throws IOException {
 		FileCheckService check = new FileCheckService(store, indexer, resolver, jdk);
 		List<Path> jars = resolver.resolve(projectDir, false);
 		List<Path> dbs = CheckOrchestrator.indexAll(store, indexer, jars);
 		Set<String> own = ProjectPackages.of(projectDir);
 		PolicyEngine policy = loadPack(projectDir, jars, dbs, own);
-		Map<Path, List<String>> answers = new LinkedHashMap<>();
+		Map<Path, FileAnswer> answers = new LinkedHashMap<>();
+		// One batch parse for every file: the per file path would build
+		// a compiler and a file manager per file.
+		Map<Path, CheckResult> results = check.checkAll(projectDir, files, dbs, own);
 		for (Path file : files) {
-			answers.put(file, checkOne(check, policy, projectDir, file, dbs, own));
+			answers.put(file, checkOne(check, policy, projectDir, file, dbs, own, results.get(file)));
 		}
 		return answers;
 	}
 
-	private List<String> checkOne(
+	private FileAnswer checkOne(
 			FileCheckService check,
 			PolicyEngine policy,
 			Path projectDir,
 			Path file,
 			List<Path> dbs,
-			Set<String> own)
+			Set<String> own,
+			CheckResult result)
 			throws IOException {
-		CheckResult result = check.checkWith(projectDir, file, dbs, own);
+		if (result == null) {
+			return new FileAnswer(file,
+					List.of("ERROR " + DisplayNames.relativizeOrFileName(projectDir, file)
+							+ ": file could not be parsed"),
+					List.of(),
+					"file could not be parsed");
+		}
 		if (!result.healthy()) {
-			return List.of("ERROR " + DisplayNames.relativizeOrFileName(projectDir, file)
-					+ ": file could not be parsed");
+			return new FileAnswer(file,
+					List.of("ERROR " + DisplayNames.relativizeOrFileName(projectDir, file)
+							+ ": file could not be parsed"),
+					List.of(),
+					"file could not be parsed");
 		}
 		List<Finding> findings = CheckOrchestrator.applyPolicy(
 				result,
@@ -163,7 +175,62 @@ public final class CheckFileTool {
 		for (Finding finding : findings) {
 			lines.add(Findings.format(finding));
 		}
-		return lines;
+		return new FileAnswer(file, lines, findings, null);
+	}
+
+	/**
+	 * Builds the machine readable answer of one checked file. The
+	 * status says whether the file is clean, carries findings, or could
+	 * not be checked at all. A failure is never a verdict.
+	 *
+	 * @param answer answer of one file, never null
+	 * @return structured content, never null
+	 */
+	static Map<String, Object> structured(FileAnswer answer) {
+		Objects.requireNonNull(answer, "answer");
+		if (answer.failure() != null) {
+			Map<String, Object> content = new LinkedHashMap<>(McpResults.failure(answer.failure()));
+			content.put("file", answer.file().toString());
+			return content;
+		}
+		Map<String, Object> content = new LinkedHashMap<>();
+		content.put("status", answer.findings().isEmpty() ? "CLEAN" : "FINDINGS");
+		content.put("file", answer.file().toString());
+		content.put("findingCount", answer.findings().size());
+		List<Map<String, Object>> findings = new ArrayList<>(answer.findings().size());
+		for (Finding finding : answer.findings()) {
+			findings.add(finding(finding));
+		}
+		content.put("findings", findings);
+		return content;
+	}
+
+	/**
+	 * Builds the machine readable entry of one finding. The kind says
+	 * what is wrong: a missing import resolves nowhere, a policy hit
+	 * sits on a resolved import, and a candidate may be project-owned
+	 * or generated. The resolved key is present only when the answer
+	 * is known, so an unverified import never reads as resolved.
+	 *
+	 * @param finding finding, never null
+	 * @return structured entry, never null
+	 */
+	private static Map<String, Object> finding(Finding finding) {
+		Objects.requireNonNull(finding, "finding");
+		Map<String, Object> entry = new LinkedHashMap<>();
+		entry.put("kind", finding.kind().name());
+		FindingKind kind = finding.kind();
+		if (kind == FindingKind.MISSING) {
+			entry.put("resolved", false);
+		} else if (kind == FindingKind.POLICY) {
+			entry.put("resolved", true);
+		}
+		entry.put("line", finding.line());
+		entry.put("text", finding.detail());
+		if (!finding.suggestion().isEmpty()) {
+			entry.put("suggestion", finding.suggestion());
+		}
+		return entry;
 	}
 
 	private PolicyEngine loadPack(Path projectDir, List<Path> jars, List<Path> dbs, Set<String> own)
@@ -177,8 +244,26 @@ public final class CheckFileTool {
 						name -> CheckOrchestrator.typeResolves(store, jdk, dbs, name, target)));
 	}
 
-	private static McpSchema.CallToolResult error(String message) {
-		McpSchema.TextContent text = McpSchema.TextContent.builder(message).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), true, null, null);
+	/**
+	 * The answer of one checked file: the rendered lines and the
+	 * findings behind them.
+	 *
+	 * @param file     file that was checked, never null
+	 * @param lines    rendered lines, empty when the file is clean, never null
+	 * @param findings findings behind the lines, never null
+	 * @param failure  why the file could not be checked, {@code null} when it could
+	 */
+	record FileAnswer(Path file, List<String> lines, List<Finding> findings, String failure) {
+
+		/**
+		 * Creates the answer.
+		 *
+		 * @throws NullPointerException if {@code file}, {@code lines}, or {@code findings} is {@code null}
+		 */
+		FileAnswer {
+			Objects.requireNonNull(file, "file");
+			Objects.requireNonNull(lines, "lines");
+			Objects.requireNonNull(findings, "findings");
+		}
 	}
 }

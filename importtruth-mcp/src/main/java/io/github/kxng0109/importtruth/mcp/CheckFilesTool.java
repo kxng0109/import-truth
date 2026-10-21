@@ -10,6 +10,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -74,10 +75,15 @@ public final class CheckFilesTool {
 	}
 
 	/**
-	 * Handles a batch check call. One resolver, index, or pack failure fails
-	 * the whole call with {@code isError=true}; invalid items become inline
-	 * {@code ERROR} lines, so an all-invalid list returns success carrying
-	 * only {@code ERROR} lines. Clean files render as {@code "clean: <path>"}.
+	 * Handles a batch check call. Every file is resolved against the
+	 * project root on its own, so one path written relative to the
+	 * project finds its file without touching the others. One
+	 * resolver, index, or pack failure fails the whole call with
+	 * {@code isError=true}; invalid items become inline {@code ERROR}
+	 * lines, so an all-invalid list returns success carrying only
+	 * {@code ERROR} lines. Clean files render as {@code "clean: <path>"}.
+	 * The structured content holds one answer per requested file, in request
+	 * order, each with the findings of that file.
 	 *
 	 * @param arguments tool arguments, never null
 	 * @return successful result with one block per file, or an error result
@@ -87,49 +93,95 @@ public final class CheckFilesTool {
 		Optional<String> project = McpArgs.string(arguments, "projectPath");
 		Optional<List<?>> raw = McpArgs.strings(arguments, "filePaths");
 		if (project.isEmpty()) {
-			return McpResults.err("projectPath is a required string");
+			String message = "projectPath is a required string";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		if (raw.isEmpty()) {
-			return McpResults.err("filePaths is a required non-empty array");
+			String message = "filePaths is a required non-empty array";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		List<?> files = raw.get();
 		if (files.size() > MAX_FILES) {
-			return McpResults.err("at most " + MAX_FILES + " files per call");
+			String message = "at most " + MAX_FILES + " files per call";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		String projectPath = project.get();
-		List<Path> valid = new ArrayList<>();
 		List<String> lines = new ArrayList<>();
-		for (Object item : files) {
-			if (!(item instanceof String filePath) || filePath.isBlank()) {
-				lines.add("ERROR file path must be a non-blank string");
-				continue;
-			}
-			try {
-				valid.add(Paths.get(filePath));
-			} catch (InvalidPathException invalid) {
-				lines.add("ERROR invalid file path: " + filePath);
-			}
-		}
-		if (valid.isEmpty()) {
-			return McpResults.ok(lines);
-		}
+		List<Request> requests = new ArrayList<>();
 		try {
-			Map<Path, List<String>> answers = check.checkFiles(Paths.get(projectPath), valid);
-			for (Map.Entry<Path, List<String>> entry : answers.entrySet()) {
-				if (entry.getValue().isEmpty()) {
+			List<Path> valid = new ArrayList<>();
+			Path projectDir = null;
+			for (Object item : files) {
+				if (!McpArgs.usableItem(item)) {
+					lines.add("ERROR file path must be a non-blank single-line string");
+					requests.add(new Request(null, "file path must be a non-blank single-line string"));
+					continue;
+				}
+				String filePath = (String) item;
+				Path path;
+				try {
+					path = Paths.get(filePath);
+				} catch (InvalidPathException invalid) {
+					lines.add("ERROR invalid file path: " + filePath);
+					requests.add(new Request(null, "invalid file path: " + filePath));
+					continue;
+				}
+				if (projectDir == null) {
+					projectDir = Paths.get(projectPath);
+				}
+				Path source = ProjectPaths.resolve(projectDir, path);
+				valid.add(source);
+				requests.add(new Request(source, null));
+			}
+			Map<Path, CheckFileTool.FileAnswer> answers = valid.isEmpty()
+					? Map.of()
+					: check.checkFiles(projectDir, valid);
+			for (Map.Entry<Path, CheckFileTool.FileAnswer> entry : answers.entrySet()) {
+				if (entry.getValue().lines().isEmpty()) {
 					lines.add("clean: " + entry.getKey());
 				} else {
-					lines.addAll(entry.getValue());
+					lines.addAll(entry.getValue().lines());
 				}
 			}
-			return McpResults.ok(lines);
+			return McpResults.ok(lines, results(requests, answers));
 		} catch (Exception failure) {
-			return McpResults.err("check failed: " + failure);
+			String message = "check failed: " + failure;
+			return McpResults.err(message, McpResults.failure(message));
 		}
 	}
 
-	private static McpSchema.CallToolResult error(String message) {
-		McpSchema.TextContent text = McpSchema.TextContent.builder(message).build();
-		return new McpSchema.CallToolResult(List.<McpSchema.Content>of(text), true, null, null);
+	/**
+	 * Wraps the per file answers in the structured content of a batch.
+	 * The list keeps the request order, so an answer lines up with the
+	 * file that was asked about. A file that could not be asked about
+	 * answers with an error, never with a verdict.
+	 *
+	 * @param requests one request per requested file, never null
+	 * @param answers  answers of the usable files, never null
+	 * @return structured content, never null
+	 */
+	private static Map<String, Object> results(
+			List<Request> requests, Map<Path, CheckFileTool.FileAnswer> answers) {
+		List<Map<String, Object>> entries = new ArrayList<>(requests.size());
+		for (Request request : requests) {
+			if (request.error() != null) {
+				entries.add(McpResults.failure(request.error()));
+				continue;
+			}
+			entries.add(CheckFileTool.structured(answers.get(request.path())));
+		}
+		Map<String, Object> content = new LinkedHashMap<>();
+		content.put("results", entries);
+		return content;
+	}
+
+	/**
+	 * One requested file: the path to check, or the reason the file
+	 * could not be read as a path.
+	 *
+	 * @param path  path to check, {@code null} when the item is unusable
+	 * @param error reason the item is unusable, {@code null} when it is a path
+	 */
+	private record Request(Path path, String error) {
 	}
 }

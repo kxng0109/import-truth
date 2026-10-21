@@ -8,6 +8,7 @@ import io.modelcontextprotocol.spec.McpSchema;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -65,7 +66,8 @@ public final class LookupTool {
 		Optional<String> project = McpArgs.string(arguments, "projectPath");
 		Optional<String> symbol = McpArgs.string(arguments, "symbol");
 		if (project.isEmpty() || symbol.isEmpty()) {
-			return McpResults.err("projectPath and symbol are required strings");
+			String message = "projectPath and symbol are required strings";
+			return McpResults.err(message, McpResults.failure(message));
 		}
 		String projectPath = project.get();
 		String name = symbol.get();
@@ -73,13 +75,17 @@ public final class LookupTool {
 		try {
 			answer = lookup.lookup(Paths.get(projectPath), name);
 		} catch (Exception failure) {
-			return McpResults.err("lookup failed: " + failure);
+			String message = "lookup failed: " + failure;
+			return McpResults.err(message, McpResults.failure(message));
 		}
-		return McpResults.ok(lines(name, answer));
+		return McpResults.ok(lines(name, answer), structured(name, answer));
 	}
 
 	/**
-	 * Renders one answer with the exact single symbol lines.
+	 * Renders one answer with the exact single symbol lines. A miss
+	 * carries no confidence token: a miss can only ever be a candidate,
+	 * so the token held no information and read to a model as "it
+	 * probably exists".
 	 *
 	 * @param name wanted fully qualified name, never null
 	 * @param answer lookup answer, never null
@@ -90,7 +96,14 @@ public final class LookupTool {
 		Objects.requireNonNull(answer, "answer");
 		List<String> lines = new ArrayList<>();
 		if (!answer.found()) {
-			lines.add("NOT_FOUND " + answer.confidence().name() + " " + name);
+			if (answer.jdkChecked()) {
+				lines.add("NOT_FOUND " + name);
+			} else {
+				// The JDK API could not be consulted, so this miss is
+				// not proven: it must not read as a verdict.
+				lines.add("UNVERIFIED " + name);
+				lines.add("not in the dependency classpath; the JDK API index is unavailable in this build");
+			}
 			for (String suggestion : answer.suggestions()) {
 				lines.add("maybe: " + suggestion);
 			}
@@ -117,5 +130,41 @@ public final class LookupTool {
 			}
 		}
 		return lines;
+	}
+
+	/**
+	 * Builds the machine readable answer for one symbol. The keys are
+	 * the verdict, the confidence, the name that was asked about, the
+	 * artifact the hit came from when it is known, the matching
+	 * symbols, and the suggestions of a miss. A key is present only
+	 * when its value is known.
+	 *
+	 * @param name wanted fully qualified name, never null
+	 * @param answer lookup answer, never null
+	 * @return structured content, never null
+	 */
+	public Map<String, Object> structured(String name, LookupResult answer) {
+		Objects.requireNonNull(name, "name");
+		Objects.requireNonNull(answer, "answer");
+		Map<String, Object> content = new LinkedHashMap<>();
+		boolean verified = answer.found() || answer.jdkChecked();
+		content.put("status", answer.found() ? "FOUND" : (verified ? "NOT_FOUND" : "UNVERIFIED"));
+		content.put("confidence", answer.confidence().name());
+		content.put("name", name);
+		content.put("jdkChecked", answer.jdkChecked());
+		if (!verified) {
+			content.put("message",
+					"the JDK API index is unavailable in this build, so this answer is unverified");
+		}
+		if (answer.fromJdk()) {
+			content.put("library", "jdk");
+		}
+		List<Map<String, Object>> matches = new ArrayList<>();
+		for (Symbol match : answer.matches()) {
+			matches.add(McpResults.symbol(match));
+		}
+		content.put("matches", matches);
+		content.put("suggestions", new ArrayList<>(answer.suggestions()));
+		return content;
 	}
 }

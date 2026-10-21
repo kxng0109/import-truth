@@ -1,10 +1,17 @@
 package io.github.kxng0109.importtruth.core;
 
+import io.github.kxng0109.importtruth.index.Sha256;
+
+import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -13,20 +20,50 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import java.util.zip.ZipFile;
 
 /**
  * Answers whether a name exists in the running JDK image. Records which
  * JDK answered, because the tool JDK may differ from the project JDK.
+ *
+ * <p>The documented API of a release comes from the bundled table
+ * first, because a build that carries no JDK, such as a native image,
+ * has no archive to read. A release the table does not cover falls
+ * back to the archive on disk, and a build with neither answers from
+ * the running image.
  */
 public final class JdkIndex {
+
+	/** Magic line at the head of a cache file, with its format version. */
+	private static final String CACHE_MAGIC = "importtruth-jdk-index 1";
+
+	/** Largest cache file that is read. */
+	private static final long MAX_CACHE_BYTES = 32L * 1024 * 1024;
+
+	/** Largest number of names a cache file may hold. */
+	private static final int MAX_CACHE_ENTRIES = 1_000_000;
 
 	private final Map<String, Boolean> cache = bounded(4096);
 	private final Map<String, Boolean> packageCache = bounded(4096);
 	private final Map<Integer, ReleaseIndex> releases = new ConcurrentHashMap<>();
+	private final Set<Integer> withoutData = ConcurrentHashMap.newKeySet();
+	private final Map<Integer, Object> releaseLocks = new ConcurrentHashMap<>();
 	private final List<Path> modules;
 	private final String jdkVersion = System.getProperty("java.version", "unknown");
 	private final int runningRelease = Runtime.version().feature();
+	private final Path ctSym;
+	private final Path cacheDir;
+	private final JdkApiTable table;
+
+	/**
+	 * The release the current thread asked about last. Whether the JDK
+	 * surface can be consulted depends on the release, and the release
+	 * is asked before the availability is, on the same thread. The
+	 * index is shared between requests, so the release is kept per
+	 * thread.
+	 */
+	private final ThreadLocal<Integer> consulted = new ThreadLocal<>();
 
 	/**
 	 * Creates a least recently used cache: typo storms evict eldest
@@ -46,16 +83,114 @@ public final class JdkIndex {
 	}
 
 	/**
-	 * Creates the index, listing the runtime image modules once.
+	 * Creates the index, listing the runtime image modules once. The
+	 * documented API of a release is read from the running JDK's
+	 * {@code lib/ct.sym} and kept in memory only.
 	 */
 	public JdkIndex() {
-		List<Path> listed;
+		this(defaultCtSym(), null);
+	}
+
+	/**
+	 * Creates the index and keeps the parsed release index on disk
+	 * under {@code <stateDir>/jdk}, so a new session does not parse
+	 * the archive again.
+	 *
+	 * @param stateDir tool state directory, never null
+	 * @throws NullPointerException when {@code stateDir} is {@code null}
+	 */
+	public JdkIndex(Path stateDir) {
+		this(defaultCtSym(), Objects.requireNonNull(stateDir, "stateDir"));
+	}
+
+	/**
+	 * Creates the index with an explicit archive and state directory.
+	 * The archive is injectable so a test can drive the paths a real
+	 * JDK does not have.
+	 *
+	 * @param ctSym    the {@code ct.sym} archive, or null when this
+	 *                 build has none, as a native image does
+	 * @param stateDir tool state directory, or null for no disk cache
+	 */
+	JdkIndex(Path ctSym, Path stateDir) {
+		this(ctSym, stateDir, runningImageModules());
+	}
+
+	/**
+	 * Creates the index with an explicit module list. A native image
+	 * has no runtime image filesystem, and a test has to be able to
+	 * drive that same shape.
+	 *
+	 * @param ctSym    the {@code ct.sym} archive, or null when this
+	 *                 build has none, as a native image does
+	 * @param stateDir tool state directory, or null for no disk cache
+	 * @param modules  runtime image modules, never null
+	 */
+	JdkIndex(Path ctSym, Path stateDir, List<Path> modules) {
+		this(ctSym, stateDir, modules, JdkApiTable.bundled());
+	}
+
+	/**
+	 * Creates the index with an explicit table. The table is injectable
+	 * so a test can drive the paths a real build does not have.
+	 *
+	 * @param ctSym    the {@code ct.sym} archive, or null when this
+	 *                 build has none, as a native image does
+	 * @param stateDir tool state directory, or null for no disk cache
+	 * @param table    the table of the documented API, never null
+	 */
+	JdkIndex(Path ctSym, Path stateDir, JdkApiTable table) {
+		this(ctSym, stateDir, runningImageModules(), table);
+	}
+
+	/**
+	 * Creates the index with an explicit module list and table. A
+	 * native image has no runtime image filesystem, and a test has to
+	 * be able to drive that same shape.
+	 *
+	 * @param ctSym    the {@code ct.sym} archive, or null when this
+	 *                 build has none, as a native image does
+	 * @param stateDir tool state directory, or null for no disk cache
+	 * @param modules  runtime image modules, never null
+	 * @param table    the table of the documented API, never null
+	 */
+	JdkIndex(Path ctSym, Path stateDir, List<Path> modules, JdkApiTable table) {
+		this.ctSym = ctSym == null ? null : ctSym.toAbsolutePath().normalize();
+		this.cacheDir = stateDir == null
+				? null
+				: stateDir.toAbsolutePath().normalize().resolve("jdk");
+		this.modules = List.copyOf(modules);
+		this.table = table == null ? JdkApiTable.empty() : table;
+	}
+
+	/**
+	 * Lists the modules of the running image. A build without the
+	 * runtime image filesystem has none.
+	 *
+	 * @return the module paths, never null
+	 */
+	private static List<Path> runningImageModules() {
 		try (var entries = Files.list(FileSystems.getFileSystem(URI.create("jrt:/")).getPath("/modules"))) {
-			listed = entries.toList();
+			return entries.toList();
 		} catch (Exception missing) {
-			listed = List.of();
+			return List.of();
 		}
-		this.modules = listed;
+	}
+
+	/**
+	 * Returns the archive the documented API of a release is read
+	 * from.
+	 *
+	 * @return the {@code ct.sym} path, or null when this build has no
+	 *         JDK home and therefore no archive
+	 */
+	private static Path defaultCtSym() {
+		String home = System.getProperty("java.home");
+		if (home == null) {
+			// A native image carries no JDK, so it has no archive to read.
+			return null;
+		}
+		return Path.of(home, "lib", "ct.sym");
 	}
 
 	/**
@@ -77,10 +212,27 @@ public final class JdkIndex {
 	}
 
 	/**
+	 * Reports whether this build can answer questions about the JDK API
+	 * at all. A native image has neither the runtime image filesystem
+	 * nor a {@code ct.sym}, so it answers the releases the bundled table
+	 * covers and nothing else, and the tool must say that for the
+	 * others instead of claiming a class is missing.
+	 *
+	 * @return true when the JDK API surface can be consulted
+	 */
+	public boolean available() {
+		if (!modules.isEmpty() || ctSym != null) {
+			return true;
+		}
+		Integer release = consulted.get();
+		return release != null && table.covers(release);
+	}
+
+	/**
 	 * Checks the name against the documented API of {@code release},
-	 * read from the running JDK's {@code ct.sym}. Falls back to the
-	 * running image when {@code release} is newer than the runtime
-	 * or no {@code ct.sym} is available.
+	 * read from the bundled table. Falls back to the running JDK's
+	 * {@code ct.sym} for a release the table does not cover, and to the
+	 * running image when there is no archive either.
 	 *
 	 * @param fqn     fully qualified name, never null
 	 * @param release target major release
@@ -89,19 +241,35 @@ public final class JdkIndex {
 	 */
 	public boolean existsIn(String fqn, int release) {
 		Objects.requireNonNull(fqn, "fqn");
+		consulted.set(release);
+		String dotted = fqn.replace('.', '/') + ".class";
+		if (table.covers(release)) {
+			return documented(name -> table.documents(name, release), dotted);
+		}
 		ReleaseIndex indexed = releaseIndex(release);
 		if (indexed == null) {
-			return exists(fqn);
+			return probeRuntime(fqn);
 		}
-		String dotted = fqn.replace('.', '/') + ".class";
-		if (indexed.classes().contains(dotted)) {
+		return documented(indexed.classes()::contains, dotted);
+	}
+
+	/**
+	 * Checks a class file name against the documented API, including
+	 * the nested type spellings.
+	 *
+	 * @param present tells whether a class file name is documented
+	 * @param dotted  the class file name, never null
+	 * @return true when a matching class file exists
+	 */
+	private static boolean documented(Predicate<String> present, String dotted) {
+		if (present.test(dotted)) {
 			return true;
 		}
 		String nested = dotted.substring(0, dotted.length() - ".class".length());
 		int slash;
 		while ((slash = nested.lastIndexOf('/')) > 0) {
 			nested = nested.substring(0, slash) + "$" + nested.substring(slash + 1);
-			if (indexed.classes().contains(nested + ".class")) {
+			if (present.test(nested + ".class")) {
 				return true;
 			}
 		}
@@ -117,6 +285,19 @@ public final class JdkIndex {
 	 */
 	public boolean exists(String fqn) {
 		Objects.requireNonNull(fqn, "fqn");
+		// The question names no release, so only the running image can
+		// answer it, and the JDK surface cannot be consulted for it.
+		consulted.remove();
+		return probeRuntime(fqn);
+	}
+
+	/**
+	 * Checks the name against the runtime image.
+	 *
+	 * @param fqn fully qualified name, never null
+	 * @return true when a matching class file exists
+	 */
+	private boolean probeRuntime(String fqn) {
 		return cache.computeIfAbsent(fqn, this::probe);
 	}
 
@@ -163,7 +344,10 @@ public final class JdkIndex {
 	 */
 	public boolean packageExists(String name) {
 		Objects.requireNonNull(name, "name");
-		return packageCache.computeIfAbsent(name, this::probePackage);
+		// The question names no release, so only the running image can
+		// answer it, and the JDK surface cannot be consulted for it.
+		consulted.remove();
+		return probeRuntimePackage(name);
 	}
 
 	private boolean probePackage(String name) {
@@ -171,10 +355,20 @@ public final class JdkIndex {
 	}
 
 	/**
+	 * Checks whether a package exists in the runtime image.
+	 *
+	 * @param name dotted package name, never null
+	 * @return true when some module holds the package directory
+	 */
+	private boolean probeRuntimePackage(String name) {
+		return packageCache.computeIfAbsent(name, this::probePackage);
+	}
+
+	/**
 	 * Checks whether a package exists in the documented API of
-	 * {@code release}. Falls back to the running image when
-	 * {@code release} is newer than the runtime or no {@code ct.sym}
-	 * is available.
+	 * {@code release}, read from the bundled table. Falls back to the
+	 * running JDK's {@code ct.sym} for a release the table does not
+	 * cover, and to the running image when there is no archive either.
 	 *
 	 * @param name    dotted package name, never null
 	 * @param release target major release
@@ -183,23 +377,79 @@ public final class JdkIndex {
 	 */
 	public boolean packageExistsIn(String name, int release) {
 		Objects.requireNonNull(name, "name");
+		consulted.set(release);
+		String path = name.replace('.', '/');
+		if (table.covers(release)) {
+			return table.hasPackage(path, release);
+		}
 		ReleaseIndex indexed = releaseIndex(release);
 		if (indexed == null) {
-			return packageExists(name);
+			return probeRuntimePackage(name);
 		}
-		return indexed.packages().contains(name.replace('.', '/'));
+		return indexed.packages().contains(path);
 	}
 
 	private ReleaseIndex releaseIndex(int release) {
 		if (release < 8 || release > runningRelease) {
 			return null;
 		}
-		return releases.computeIfAbsent(release, this::loadRelease);
+		// One loader at a time. A plain computeIfAbsent lets every
+		// concurrent caller parse the whole archive on its own.
+		synchronized (releaseLocks.computeIfAbsent(release, key -> new Object())) {
+			ReleaseIndex known = releases.get(release);
+			if (known != null) {
+				return known;
+			}
+			if (withoutData.contains(release)) {
+				return null;
+			}
+			ReleaseIndex loaded = loadRelease(release);
+			if (loaded == null) {
+				// The negative answer is cached as well: a JDK without
+				// a readable ct.sym must not parse the archive on every
+				// lookup. A null never reaches the map, which forbids
+				// null values.
+				withoutData.add(release);
+			} else {
+				releases.put(release, loaded);
+			}
+			return loaded;
+		}
 	}
 
+	/**
+	 * Loads the documented API of a release. The disk cache answers
+	 * first, so a new session does not parse the archive again; a
+	 * parsed release is published to the cache for the next one.
+	 *
+	 * @param release target major release
+	 * @return the index, or null when the archive holds no data
+	 */
 	private ReleaseIndex loadRelease(int release) {
+		ReleaseIndex cached = readCache(release);
+		if (cached != null) {
+			return cached;
+		}
+		ReleaseIndex parsed = parseArchive(release);
+		if (parsed != null) {
+			writeCache(release, parsed);
+		}
+		return parsed;
+	}
+
+	/**
+	 * Parses the documented API of a release from the archive. A JDK
+	 * without a readable archive offers no documented API.
+	 *
+	 * @param release target major release
+	 * @return the index, or null when the archive holds no data
+	 */
+	private ReleaseIndex parseArchive(int release) {
+		if (ctSym == null) {
+			// This build has no archive, so it has no documented API.
+			return null;
+		}
 		char marker = release == 8 ? '8' : release == 9 ? '9' : (char) ('A' + release - 10);
-		Path ctSym = Path.of(System.getProperty("java.home"), "lib", "ct.sym");
 		Set<String> classes = new HashSet<>();
 		Set<String> packages = new HashSet<>();
 		try (ZipFile zip = new ZipFile(ctSym.toFile())) {
@@ -229,6 +479,232 @@ public final class JdkIndex {
 			return null;
 		}
 		return new ReleaseIndex(Set.copyOf(classes), Set.copyOf(packages));
+	}
+
+	/**
+	 * Reads a cached release index. A cache that is missing, corrupt
+	 * or written for another archive is ignored: the archive is parsed
+	 * again rather than a lookup failing.
+	 *
+	 * @param release target major release
+	 * @return the cached index, or null when there is none
+	 */
+	private ReleaseIndex readCache(int release) {
+		if (cacheDir == null) {
+			return null;
+		}
+		Path file = cacheFile(release);
+		try {
+			if (!Files.isRegularFile(file) || Files.size(file) > MAX_CACHE_BYTES) {
+				return null;
+			}
+			return parseCache(Files.readAllLines(file, StandardCharsets.UTF_8), release);
+		} catch (IOException | RuntimeException unreadable) {
+			return null;
+		}
+	}
+
+	/**
+	 * Parses a cached release index. The file holds a magic line, the
+	 * archive identity, the release, then the class names and the
+	 * package names, each with its count.
+	 *
+	 * @param lines   the file lines, never null
+	 * @param release the release the file must describe
+	 * @return the index, or null when the file is not a valid cache
+	 */
+	private ReleaseIndex parseCache(List<String> lines, int release) {
+		Cursor cursor = new Cursor(lines);
+		if (!cursor.expect(CACHE_MAGIC)) {
+			return null;
+		}
+		String path = cursor.header("path");
+		long size = cursor.number("size");
+		long modified = cursor.number("modified");
+		String releaseText = cursor.header("release");
+		if (path == null || size < 0 || modified < 0 || releaseText == null) {
+			return null;
+		}
+		if (ctSym == null || !ctSym.toString().equals(path) || !String.valueOf(release).equals(releaseText)) {
+			return null;
+		}
+		if (!identityMatches(size, modified)) {
+			return null;
+		}
+		long classCount = cursor.number("classes");
+		if (classCount < 0 || classCount > MAX_CACHE_ENTRIES) {
+			return null;
+		}
+		Set<String> classes = new HashSet<>();
+		for (long i = 0; i < classCount; i++) {
+			String name = cursor.next();
+			if (name == null) {
+				return null;
+			}
+			classes.add(name);
+		}
+		long packageCount = cursor.number("packages");
+		if (packageCount < 0 || packageCount > MAX_CACHE_ENTRIES) {
+			return null;
+		}
+		Set<String> packages = new HashSet<>();
+		for (long i = 0; i < packageCount; i++) {
+			String name = cursor.next();
+			if (name == null) {
+				return null;
+			}
+			packages.add(name);
+		}
+		return new ReleaseIndex(Set.copyOf(classes), Set.copyOf(packages));
+	}
+
+	/**
+	 * Tests whether the archive on disk is the one the cache was
+	 * written from. A vanished archive keeps its cache: the recorded
+	 * path still names the JDK the data came from.
+	 *
+	 * @param size     recorded archive size in bytes
+	 * @param modified recorded archive modification time in millis
+	 * @return true when the cache describes the archive on disk
+	 */
+	private boolean identityMatches(long size, long modified) {
+		if (ctSym == null) {
+			return false;
+		}
+		try {
+			return Files.size(ctSym) == size && Files.getLastModifiedTime(ctSym).toMillis() == modified;
+		} catch (IOException vanished) {
+			return true;
+		}
+	}
+
+	/**
+	 * Writes the release index to the cache. The file is published
+	 * atomically, so a reader never sees a half written index, and a
+	 * cache that cannot be written only costs a parse next time.
+	 *
+	 * @param release target major release
+	 * @param index   the index to cache, never null
+	 */
+	private void writeCache(int release, ReleaseIndex index) {
+		if (cacheDir == null || ctSym == null) {
+			return;
+		}
+		Path file = cacheFile(release);
+		Path staged = null;
+		try {
+			long size = Files.size(ctSym);
+			long modified = Files.getLastModifiedTime(ctSym).toMillis();
+			Files.createDirectories(cacheDir);
+			staged = Files.createTempFile(cacheDir, "jdk-index-", ".tmp");
+			Files.write(staged, renderCache(release, index, size, modified), StandardCharsets.UTF_8);
+			try {
+				Files.move(staged, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+			} catch (AtomicMoveNotSupportedException noAtomic) {
+				Files.move(staged, file, StandardCopyOption.REPLACE_EXISTING);
+			}
+		} catch (IOException | RuntimeException unwritable) {
+			// A cache that cannot be written is not an error: the next
+			// session parses the archive again.
+		} finally {
+			if (staged != null) {
+				try {
+					Files.deleteIfExists(staged);
+				} catch (IOException ignored) {
+					// The staged file is already gone or already moved.
+				}
+			}
+		}
+	}
+
+	/**
+	 * Renders the cache file of a release.
+	 *
+	 * @param release  target major release
+	 * @param index    the index to render, never null
+	 * @param size     archive size in bytes
+	 * @param modified archive modification time in millis
+	 * @return the file lines, never null
+	 */
+	private List<String> renderCache(int release, ReleaseIndex index, long size, long modified) {
+		List<String> classes = index.classes().stream().sorted().toList();
+		List<String> packages = index.packages().stream().sorted().toList();
+		List<String> lines = new ArrayList<>();
+		lines.add(CACHE_MAGIC);
+		lines.add("path " + (ctSym == null ? "none" : ctSym));
+		lines.add("size " + size);
+		lines.add("modified " + modified);
+		lines.add("release " + release);
+		lines.add("classes " + classes.size());
+		lines.addAll(classes);
+		lines.add("packages " + packages.size());
+		lines.addAll(packages);
+		return lines;
+	}
+
+	/**
+	 * Names the cache file of a release. The name follows the archive
+	 * path and the release, so the file is found again even when the
+	 * archive has vanished; the archive identity is verified inside.
+	 *
+	 * @param release target major release
+	 * @return the cache file, never null
+	 */
+	private Path cacheFile(int release) {
+		String name = Sha256.ofBytes((ctSym + "|" + release).getBytes(StandardCharsets.UTF_8));
+		return cacheDir.resolve(name + ".jdkidx");
+	}
+
+	/**
+	 * Reads the lines of a cache file in order.
+	 */
+	private static final class Cursor {
+
+		private final List<String> lines;
+		private int at;
+
+		private Cursor(List<String> lines) {
+			this.lines = lines;
+		}
+
+		private boolean expect(String literal) {
+			if (at >= lines.size() || !literal.equals(lines.get(at))) {
+				return false;
+			}
+			at++;
+			return true;
+		}
+
+		private String header(String name) {
+			if (at >= lines.size()) {
+				return null;
+			}
+			String line = lines.get(at++);
+			String prefix = name + " ";
+			if (!line.startsWith(prefix)) {
+				return null;
+			}
+			return line.substring(prefix.length());
+		}
+
+		private long number(String name) {
+			String value = header(name);
+			if (value == null) {
+				return -1;
+			}
+			try {
+				return Long.parseLong(value.trim());
+			} catch (NumberFormatException invalid) {
+				return -1;
+			}
+		}
+
+		private String next() {
+			if (at >= lines.size()) {
+				return null;
+			}
+			return lines.get(at++);
+		}
 	}
 
 	private record ReleaseIndex(Set<String> classes, Set<String> packages) {

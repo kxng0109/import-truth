@@ -64,12 +64,37 @@ final class AsmLibraryIndexerTest {
 		assertThat(symbols.stream().noneMatch(s -> s.fqn().equals("com.example.Old.secret")))
 				.as("private method excluded")
 				.isTrue();
-		assertThat(find(symbols, "com.example.Old$Holder").kind()).as("inner class kind").isEqualTo(SymbolKind.CLASS);
+		assertThat(find(symbols, "com.example.Old.Holder").kind()).as("inner class kind").isEqualTo(SymbolKind.CLASS);
 		assertThat(find(symbols, "com.example.StringBox.take").signature())
 				.as("varargs descriptor")
 				.isEqualTo("([Ljava/lang/String;)V");
 		assertThat(symbols.stream().noneMatch(SymbolTestPredicates::isBridgePut))
 				.as("bridge method excluded")
+				.isTrue();
+	}
+
+	@Test
+	@DisplayName("names nested types the way source code writes them")
+	void namesNestedTypesInSourceForm() throws Exception {
+		Path jar = jarOf(Map.of(
+				"com.example.Outer",
+				"package com.example; public class Outer {"
+						+ " public static class Inner { public static class Deep {} public void deep() {} }"
+						+ " public void go() {} }",
+				"com.example.Dollar$Name",
+				"package com.example; public class Dollar$Name {}"));
+
+		List<Symbol> symbols = new AsmLibraryIndexer().index(jar);
+
+		assertThat(find(symbols, "com.example.Outer.Inner").kind()).as("nested type")
+				.isEqualTo(SymbolKind.CLASS);
+		assertThat(find(symbols, "com.example.Outer.Inner.Deep").kind()).as("doubly nested type")
+				.isEqualTo(SymbolKind.CLASS);
+		assertThat(find(symbols, "com.example.Outer.Inner.deep").signature()).as("member of a nested type")
+				.isEqualTo("()V");
+		assertThat(find(symbols, "com.example.Dollar$Name").kind()).as("top level name holding a dollar")
+				.isEqualTo(SymbolKind.CLASS);
+		assertThat(symbols.stream().noneMatch(s -> s.fqn().contains("Outer$"))).as("no binary names left")
 				.isTrue();
 	}
 

@@ -151,6 +151,29 @@ final class SuggestionsTest {
 				.contains("com.example.Widget");
 	}
 
+	@Test
+	@DisplayName("suggests types only, never members")
+	void suggestsTypesOnly() throws Exception {
+		JarIndexStore store = openStore("types");
+		Path jar = jars.resolve("types.jar");
+		Files.write(jar, "types".getBytes(StandardCharsets.UTF_8));
+		LibraryIndexer indexer = jarFile -> List.of(
+				new Symbol("com.example.Widget", SymbolKind.CLASS, null, null, false, "", false),
+				new Symbol("com.example.Widget.build", SymbolKind.METHOD, "()V",
+						"com.example.Widget", false, "", false),
+				new Symbol("com.example.Widget.version", SymbolKind.FIELD, "Ljava/lang/String;",
+						"com.example.Widget", false, "", false),
+				new Symbol("com.example.WidgetHelper", SymbolKind.CLASS, null, null, false, "", false));
+		Path db = store.ensureIndexed(jar, indexer);
+
+		List<String> ranked = Suggestions.collect(store, List.of(db), "com.example.Widget", 10, 10);
+
+		assertThat(ranked).as("types offered")
+				.contains("com.example.Widget", "com.example.WidgetHelper");
+		assertThat(ranked).as("members withheld")
+				.doesNotContain("com.example.Widget.build", "com.example.Widget.version");
+	}
+
 	private JarIndexStore openStore(String name) throws Exception {
 		JarIndexStore created = new JarIndexStore(state.resolve(name));
 		openStores.add(created);
