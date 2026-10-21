@@ -1037,16 +1037,31 @@ final class MavenResolverTest {
 	@Test
 	@DisplayName("skips malformed search path entries")
 	void skipsMalformedSearchPathEntries() {
-		String broken = "C:\\bad\u0000name";
+		// A NUL character cannot occur in a path on any platform, so
+		// the entry is malformed everywhere and not only on Windows.
+		String broken = "bad\u0000entry";
+		// A single path segment holds no path separator, so the split
+		// of the search path cannot cut it in two the way a drive
+		// letter is cut on a unix machine.
+		Path good = Path.of("good");
 		List<Path> dirs = MavenResolver.launcherSearchPath(
-				File.pathSeparator + "C:\\good" + File.pathSeparator + broken + File.pathSeparator + "   ",
+				File.pathSeparator + good + File.pathSeparator + broken + File.pathSeparator + "   ",
 				broken, "   ");
 
-		assertThat(dirs).as("only the good entries").containsExactly(Path.of("C:\\good"));
+		assertThat(dirs).as("only the good entries").containsExactly(good);
 		assertThat(MavenResolver.launcherSearchPath("  ", null, null)).as("an empty search path").isEmpty();
 		assertThat(MavenResolver.launcherSearchPath(null, null, null)).as("a missing search path").isEmpty();
 		assertThat(MavenResolver.systemLauncherAvailable(true, Collections.singletonList(null)))
 				.as("a missing directory").isFalse();
+	}
+
+	@Test
+	@EnabledOnOs(OS.WINDOWS)
+	@DisplayName("keeps a drive path whole in the windows search path")
+	void keepsWindowsDrivePaths() {
+		List<Path> dirs = MavenResolver.launcherSearchPath("C:\\good", null, null);
+
+		assertThat(dirs).as("the drive path survives the split").containsExactly(Path.of("C:\\good"));
 	}
 
 	/**

@@ -129,6 +129,15 @@ On a fresh machine the first lookup downloads our pinned Maven
 plugin once, then stays offline; project dependencies are never
 fetched on your behalf.
 
+The build and the tool have to agree on the local repository, because
+Maven 3.10 records the origin of a downloaded artifact under a key that
+carries the repository URL while Maven 3.9 reads the plain repository
+id, and a repository written by one is invisible to the other. The CI
+job therefore sets `-Daether.system.trackingRepositoryKeyFunction=nid`
+in `MAVEN_ARGS`, which covers the build and every spawned child, and
+that is the key every Maven version reads. Set the same property when
+your own build and the Maven on your PATH are not the same version.
+
 Every module enforces coverage gates on `verify`: 95% line, 90% branch
 (the `Main` wiring class is excluded. Everything else is tested). The
 gates have already caught real bugs, so they stay.
