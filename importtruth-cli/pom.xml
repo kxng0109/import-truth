@@ -21,7 +21,7 @@
       1.1.16. The plugin is declared inside a profile, so the default
       build never resolves it and never needs it on the network.
     -->
-    <native.maven.plugin.version>1.1.16</native.maven.plugin.version>
+    <native.maven.plugin.version>1.1.17</native.maven.plugin.version>
     <!--
       Maximum heap of the native image, in bytes.
 
